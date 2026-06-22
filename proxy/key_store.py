@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import os
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def fingerprint(token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"{token[:3]}...{digest[:10]}"
+
+
+@dataclass
+class KeyState:
+    token: str
+    fingerprint: str
+    total_requests: int = 0
+    failed_requests: int = 0
+    last_used: str | None = None
+    cooldown_until: float = 0.0
+    disabled_reason: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.disabled_reason is None and time.time() >= self.cooldown_until
+
+    @property
+    def cooling_down(self) -> bool:
+        return self.disabled_reason is None and time.time() < self.cooldown_until
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "fingerprint": self.fingerprint,
+            "total_requests": self.total_requests,
+            "failed_requests": self.failed_requests,
+            "last_used": self.last_used,
+            "cooldown_until": (
+                datetime.fromtimestamp(self.cooldown_until, timezone.utc).isoformat()
+                if self.cooldown_until
+                else None
+            ),
+            "disabled_reason": self.disabled_reason,
+        }
+
+
+class KeyStore:
+    def __init__(self, keys_file: str, reload_seconds: int) -> None:
+        self.keys_file = Path(keys_file)
+        self.reload_seconds = max(1, reload_seconds)
+        self._keys: list[KeyState] = []
+        self._known_stats: dict[str, KeyState] = {}
+        self._mtime: float | None = None
+        self._last_reload: str | None = None
+        self._next_index = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def last_reload(self) -> str | None:
+        return self._last_reload
+
+    async def load(self, force: bool = False) -> None:
+        async with self._lock:
+            self.keys_file.parent.mkdir(parents=True, exist_ok=True)
+            if not self.keys_file.exists():
+                self.keys_file.touch(mode=0o600)
+
+            mtime = self.keys_file.stat().st_mtime
+            if not force and self._mtime == mtime:
+                return
+
+            raw_tokens = [
+                line.strip()
+                for line in self.keys_file.read_text().splitlines()
+                if line.strip()
+            ]
+            seen: set[str] = set()
+            tokens: list[str] = []
+            for token in raw_tokens:
+                if token not in seen:
+                    seen.add(token)
+                    tokens.append(token)
+
+            next_keys: list[KeyState] = []
+            for token in tokens:
+                fp = fingerprint(token)
+                state = self._known_stats.get(fp)
+                if state is None:
+                    state = KeyState(token=token, fingerprint=fp)
+                else:
+                    state.token = token
+                next_keys.append(state)
+                self._known_stats[fp] = state
+
+            self._keys = next_keys
+            self._mtime = mtime
+            self._last_reload = utc_now_iso()
+            if self._next_index >= len(self._keys):
+                self._next_index = 0
+
+    async def reload_if_changed(self) -> None:
+        await self.load(force=False)
+
+    async def watch(self) -> None:
+        while True:
+            try:
+                await self.reload_if_changed()
+            except Exception:
+                pass
+            await asyncio.sleep(self.reload_seconds)
+
+    async def acquire(self) -> KeyState | None:
+        async with self._lock:
+            if not self._keys:
+                return None
+
+            total = len(self._keys)
+            for offset in range(total):
+                idx = (self._next_index + offset) % total
+                state = self._keys[idx]
+                if state.available:
+                    self._next_index = idx
+                    state.total_requests += 1
+                    state.last_used = utc_now_iso()
+                    return state
+            return None
+
+    async def fail_key(self, state: KeyState) -> None:
+        async with self._lock:
+            state.failed_requests += 1
+
+    async def cooldown_key(self, state: KeyState, seconds: int) -> None:
+        async with self._lock:
+            state.failed_requests += 1
+            state.cooldown_until = time.time() + max(1, seconds)
+            self._advance_from(state)
+
+    async def invalidate_key(self, state: KeyState, reason: str) -> None:
+        async with self._lock:
+            state.failed_requests += 1
+            state.disabled_reason = reason
+            self._advance_from(state)
+            active_tokens = [
+                key.token for key in self._keys if key.disabled_reason is None
+            ]
+            self._atomic_write_tokens(active_tokens)
+            self._mtime = self.keys_file.stat().st_mtime
+
+    def _advance_from(self, state: KeyState) -> None:
+        for idx, key in enumerate(self._keys):
+            if key is state:
+                self._next_index = (idx + 1) % max(1, len(self._keys))
+                return
+
+    def _atomic_write_tokens(self, tokens: list[str]) -> None:
+        payload = "".join(f"{token}\n" for token in tokens)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.keys_file.name}.",
+            suffix=".tmp",
+            dir=str(self.keys_file.parent),
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w") as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.keys_file)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "keys_total": len(self._keys),
+            "keys_available": sum(1 for key in self._keys if key.available),
+            "keys_cooling_down": sum(1 for key in self._keys if key.cooling_down),
+            "keys_disabled": sum(1 for key in self._keys if key.disabled_reason),
+        }
+
+    def key_stats(self) -> list[dict[str, Any]]:
+        return [key.public() for key in self._keys]

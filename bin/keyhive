@@ -1,0 +1,566 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="/root/api_maker"
+SCRIPTS_DIR="$ROOT_DIR/scripts"
+DATA_DIR="$ROOT_DIR/data"
+SYSTEMD_DIR="$ROOT_DIR/systemd"
+
+SERVICE="${KEYHIVE_SERVICE:-api-maker-scheduler.service}"
+PROXY_SERVICE="${KEYHIVE_PROXY_SERVICE:-keyhive-proxy.service}"
+PROXY_URL="${KEYHIVE_PROXY_URL:-http://127.0.0.1:8787}"
+
+HF_KEYS_JS="$SCRIPTS_DIR/hf_keys.js"
+COUNT_KEYS_PY="$SCRIPTS_DIR/count_keys.py"
+KEYS_FILE="$DATA_DIR/keys.txt"
+COOKIE_FILE="$DATA_DIR/hc_cookie.json"
+
+PYTHON_BIN="/usr/bin/python3"
+if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+fi
+
+NODE_BIN="$(command -v node || true)"
+
+if [ -t 1 ]; then
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  GREEN="$(printf '\033[32m')"
+  CYAN="$(printf '\033[36m')"
+  YELLOW="$(printf '\033[33m')"
+  RED="$(printf '\033[31m')"
+  RESET="$(printf '\033[0m')"
+else
+  BOLD=""
+  DIM=""
+  GREEN=""
+  CYAN=""
+  YELLOW=""
+  RED=""
+  RESET=""
+fi
+
+section() {
+  printf "\n%s%s%s\n" "$BOLD" "$1" "$RESET"
+}
+
+row() {
+  printf "  %s%-18s%s %s\n" "$CYAN" "$1" "$RESET" "$2"
+}
+
+usage() {
+  cat << USAGE
+${BOLD}KEYHIVE${RESET}
+API key automation + local AI proxy control
+USAGE
+  section "USAGE"
+  row "keyhive [cmd]" "Run scanner, proxy, and reporting commands"
+
+  section "SCANNER"
+  row "start" "Start background key scanner"
+  row "stop" "Stop background key scanner"
+  row "restart" "Restart background key scanner"
+  row "status" "Show scanner state, key count, and cookie age"
+  row "logs" "Show recent scanner logs"
+  row "logs -f" "Follow scanner logs"
+  row "logs 200" "Show last 200 scanner log lines"
+  row "runs=1" "Run hf_keys.js manually N times"
+  row "report" "Count saved keys and estimate capacity"
+
+  section "PROXY"
+  row "proxy start" "Start local AI proxy"
+  row "proxy stop" "Stop local AI proxy"
+  row "proxy restart" "Restart local AI proxy"
+  row "proxy status" "Show proxy service status and health"
+  row "proxy logs" "Show recent proxy logs"
+  row "proxy logs -f" "Follow proxy logs"
+  row "proxy stats" "Show proxy runtime stats"
+  row "proxy fallback" "Show fallback provider status"
+  row "proxy test" "Send a tiny test request through the proxy"
+
+  section "OTHER"
+  row "tree" "Show a clean project tree"
+  row "help" "Show this help"
+
+  section "SERVICES"
+  printf "  Scanner: %s\n" "$SERVICE"
+  printf "  Proxy:   %s\n" "$PROXY_SERVICE"
+
+  section "PROJECT"
+  printf "  %s\n" "$ROOT_DIR"
+}
+
+need_project() {
+  if [ ! -d "$ROOT_DIR" ]; then
+    echo "✗ Project folder missing: $ROOT_DIR" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$HF_KEYS_JS" ]; then
+    echo "✗ Missing scanner script: $HF_KEYS_JS" >&2
+    exit 1
+  fi
+}
+
+need_node() {
+  if [ -z "$NODE_BIN" ]; then
+    echo "✗ node not found in PATH" >&2
+    exit 1
+  fi
+}
+
+service_exists() {
+  systemctl list-unit-files "$SERVICE" >/dev/null 2>&1
+}
+
+proxy_service_exists() {
+  systemctl list-unit-files "$PROXY_SERVICE" >/dev/null 2>&1
+}
+
+start_service() {
+  if ! service_exists; then
+    echo "✗ Systemd service not found: $SERVICE"
+    echo "Expected service file around:"
+    echo "  /etc/systemd/system/$SERVICE"
+    echo "  $SYSTEMD_DIR/$SERVICE"
+    exit 1
+  fi
+
+  systemctl start "$SERVICE"
+  echo "✓ keyhive scanner started"
+  systemctl status "$SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+stop_service() {
+  if ! service_exists; then
+    echo "✗ Systemd service not found: $SERVICE"
+    exit 1
+  fi
+
+  systemctl stop "$SERVICE"
+  echo "✓ keyhive scanner stopped"
+}
+
+restart_service() {
+  if ! service_exists; then
+    echo "✗ Systemd service not found: $SERVICE"
+    exit 1
+  fi
+
+  systemctl restart "$SERVICE"
+  echo "✓ keyhive scanner restarted"
+  systemctl status "$SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+show_status() {
+  section "KEYHIVE SCANNER"
+  printf "  Project: %-24s %s\n" "$ROOT_DIR" ""
+  printf "  Service: %s\n\n" "$SERVICE"
+
+  if service_exists; then
+    active="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$SERVICE" 2>/dev/null || true)"
+    main_pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+    since="$(systemctl show "$SERVICE" -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+
+    printf "  %-16s %s\n" "Active:" "${active:-unknown}"
+    printf "  %-16s %s\n" "Enabled:" "${enabled:-unknown}"
+    printf "  %-16s %s\n" "Main PID:" "${main_pid:-unknown}"
+    printf "  %-16s %s\n" "Since:" "${since:-unknown}"
+  else
+    printf "  %-16s %s\n" "Active:" "missing"
+    printf "  %-16s %s\n" "Enabled:" "missing"
+  fi
+
+  section "KEYS"
+
+  if [ -f "$KEYS_FILE" ]; then
+    key_count="$(grep -cve '^\s*$' "$KEYS_FILE" || true)"
+    printf "  %-16s %s\n" "File:" "$KEYS_FILE"
+    printf "  %-16s %s\n" "Count:" "$key_count"
+    printf "  %-16s %s\n" "Modified:" "$(date -d "@$(stat -c %Y "$KEYS_FILE")" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || stat -c %y "$KEYS_FILE")"
+  else
+    printf "  %-16s missing: %s\n" "File:" "$KEYS_FILE"
+    printf "  %-16s 0\n" "Count:"
+  fi
+
+  section "COOKIE"
+
+  if [ -f "$COOKIE_FILE" ]; then
+    cookie_mtime="$(stat -c %Y "$COOKIE_FILE")"
+    now="$(date +%s)"
+    age_sec="$((now - cookie_mtime))"
+    age_min="$((age_sec / 60))"
+    age_hr="$((age_min / 60))"
+
+    printf "  %-16s %s\n" "File:" "$COOKIE_FILE"
+    printf "  %-16s %s\n" "Modified:" "$(date -d "@$cookie_mtime" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || stat -c %y "$COOKIE_FILE")"
+    printf "  %-16s %sh %sm\n" "Age:" "$age_hr" "$age_min"
+  else
+    printf "  %-16s missing: %s\n" "File:" "$COOKIE_FILE"
+  fi
+}
+
+show_logs() {
+  lines="120"
+  follow="false"
+
+  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--follow" ]; then
+    follow="true"
+  elif [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    lines="$1"
+  fi
+
+  if ! service_exists; then
+    echo "✗ Systemd service not found: $SERVICE"
+    exit 1
+  fi
+
+  if [ "$follow" = "true" ]; then
+    journalctl -u "$SERVICE" -b -f -o cat
+  else
+    journalctl -u "$SERVICE" -b -n "$lines" -o cat --no-pager
+  fi
+}
+
+show_proxy_logs() {
+  lines="120"
+  follow="false"
+
+  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--follow" ]; then
+    follow="true"
+  elif [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    lines="$1"
+  fi
+
+  if ! proxy_service_exists; then
+    echo "✗ Systemd service not found: $PROXY_SERVICE"
+    exit 1
+  fi
+
+  if [ "$follow" = "true" ]; then
+    journalctl -u "$PROXY_SERVICE" -b -f -o cat
+  else
+    journalctl -u "$PROXY_SERVICE" -b -n "$lines" -o cat --no-pager
+  fi
+}
+
+run_report() {
+  if [ ! -f "$COUNT_KEYS_PY" ]; then
+    echo "✗ Missing report script: $COUNT_KEYS_PY" >&2
+    exit 1
+  fi
+
+  cd "$ROOT_DIR"
+  "$PYTHON_BIN" "$COUNT_KEYS_PY"
+}
+
+parse_runs_amount() {
+  raw="${1:-}"
+
+  case "$raw" in
+    runs=*)
+      echo "${raw#runs=}"
+      ;;
+    --runs=*)
+      echo "${raw#--runs=}"
+      ;;
+    --amount=*)
+      echo "${raw#--amount=}"
+      ;;
+    --amount)
+      echo "${2:-}"
+      ;;
+    "")
+      echo "1"
+      ;;
+    *)
+      echo "$raw"
+      ;;
+  esac
+}
+
+run_manual() {
+  need_project
+  need_node
+
+  amount="$(parse_runs_amount "${1:-}" "${2:-}")"
+
+  if ! [[ "$amount" =~ ^[0-9]+$ ]] || [ "$amount" -lt 1 ]; then
+    echo "✗ Invalid run amount: $amount"
+    echo "Use: keyhive runs=1"
+    exit 1
+  fi
+
+  echo "=== KEYHIVE MANUAL RUN ==="
+  echo "Runs: $amount"
+  echo "Script: $HF_KEYS_JS"
+  echo
+
+  cd "$ROOT_DIR"
+
+  for i in $(seq 1 "$amount"); do
+    echo
+    echo "=== RUN $i/$amount ==="
+    "$NODE_BIN" "$HF_KEYS_JS"
+  done
+
+  echo
+  echo "✓ Manual run complete"
+}
+
+show_tree() {
+  cd "$ROOT_DIR"
+  if ! command -v tree >/dev/null 2>&1; then
+    echo "✗ tree not found" >&2
+    exit 1
+  fi
+
+  tree -a -I '.git|.venv|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|fail_*.png|chrome-*.log|*.log'
+}
+
+proxy_start() {
+  if ! proxy_service_exists; then
+    echo "✗ Systemd service not found: $PROXY_SERVICE"
+    echo "Expected service file around:"
+    echo "  /etc/systemd/system/$PROXY_SERVICE"
+    echo "  $SYSTEMD_DIR/$PROXY_SERVICE"
+    exit 1
+  fi
+
+  systemctl start "$PROXY_SERVICE"
+  echo "✓ keyhive proxy started"
+  systemctl status "$PROXY_SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+proxy_stop() {
+  if ! proxy_service_exists; then
+    echo "✗ Systemd service not found: $PROXY_SERVICE"
+    exit 1
+  fi
+
+  systemctl stop "$PROXY_SERVICE"
+  echo "✓ keyhive proxy stopped"
+}
+
+proxy_restart() {
+  if ! proxy_service_exists; then
+    echo "✗ Systemd service not found: $PROXY_SERVICE"
+    exit 1
+  fi
+
+  systemctl restart "$PROXY_SERVICE"
+  echo "✓ keyhive proxy restarted"
+  systemctl status "$PROXY_SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+curl_json() {
+  url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    body="$(curl -fsS "$url" 2>/dev/null || true)"
+  else
+    echo "✗ curl not found" >&2
+    exit 1
+  fi
+
+  if [ -z "$body" ]; then
+    echo "✗ Request failed: $url" >&2
+    exit 1
+  fi
+
+  if "$PYTHON_BIN" -m json.tool >/dev/null 2>&1 <<<"$body"; then
+    "$PYTHON_BIN" -m json.tool <<<"$body"
+  else
+    echo "$body"
+  fi
+}
+
+proxy_status() {
+  section "KEYHIVE PROXY"
+  printf "  %-12s %s\n" "Service:" "$PROXY_SERVICE"
+  printf "  %-12s %s\n\n" "URL:" "$PROXY_URL"
+
+  if proxy_service_exists; then
+    systemctl status "$PROXY_SERVICE" --no-pager -l | sed -n '1,12p'
+  else
+    printf "  %-12s missing\n" "Service:"
+  fi
+
+  section "HEALTH"
+  curl_json "$PROXY_URL/health" || true
+}
+
+proxy_stats() {
+  section "KEYHIVE PROXY STATS"
+  curl_json "$PROXY_URL/stats"
+}
+
+proxy_fallback() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "✗ curl not found" >&2
+    exit 1
+  fi
+
+  body="$(curl -fsS "$PROXY_URL/stats" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    echo "✗ Request failed: $PROXY_URL/stats" >&2
+    exit 1
+  fi
+
+  "$PYTHON_BIN" - "$body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+provider = data.get("current_provider", "unknown")
+hf_keys = data.get("hf_usable_keys", data.get("keys_available", 0))
+enabled = data.get("fallback_enabled", False)
+nvidia = data.get("nvidia_available", False)
+enter_at = data.get("fallback_enter_at", 0)
+exit_at = data.get("fallback_exit_at", 10)
+model = data.get("nvidia_model", "unknown")
+reason = data.get("fallback_reason")
+
+print("KEYHIVE FALLBACK")
+if provider == "nvidia":
+    print("Current provider: NVIDIA fallback")
+    print(f"Reason:           {reason or f'HF usable keys are {hf_keys}'}")
+    print(f"HF usable keys:   {hf_keys}")
+    print(f"Switch back at:   {exit_at} keys")
+else:
+    print("Current provider: Hugging Face")
+    print(f"HF usable keys:   {hf_keys}")
+    print(f"Fallback:         {'enabled' if enabled else 'disabled'}")
+    print(f"NVIDIA:           {'available' if nvidia else 'unavailable'}")
+    print(f"Enter fallback:   <= {enter_at} keys")
+    print(f"Exit fallback:    >= {exit_at} keys")
+    print(f"NVIDIA model:     {model}")
+PY
+}
+
+proxy_test() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "✗ curl not found" >&2
+    exit 1
+  fi
+
+  payload='{"model":"default","messages":[{"role":"user","content":"Say hello from KeyHive proxy in one sentence."}],"max_tokens":64,"stream":false}'
+  response="$(curl -fsS "$PROXY_URL/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" 2>/dev/null || true)"
+
+  if [ -z "$response" ]; then
+    echo "✗ Proxy test request failed: $PROXY_URL/v1/chat/completions" >&2
+    exit 1
+  fi
+
+  section "KEYHIVE PROXY TEST"
+  if "$PYTHON_BIN" -m json.tool >/dev/null 2>&1 <<<"$response"; then
+    "$PYTHON_BIN" -m json.tool <<<"$response"
+  else
+    echo "$response"
+  fi
+}
+
+proxy_cmd() {
+  subcmd="${1:-help}"
+  shift || true
+
+  case "$subcmd" in
+    start)
+      proxy_start
+      ;;
+    stop)
+      proxy_stop
+      ;;
+    restart)
+      proxy_restart
+      ;;
+    status)
+      proxy_status
+      ;;
+    logs)
+      show_proxy_logs "${1:-}"
+      ;;
+    stats)
+      proxy_stats
+      ;;
+    fallback)
+      proxy_fallback
+      ;;
+    test)
+      proxy_test
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      echo "✗ Unknown proxy command: $subcmd"
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+cmd="${1:-help}"
+
+case "$cmd" in
+  start)
+    start_service
+    ;;
+
+  stop)
+    stop_service
+    ;;
+
+  restart)
+    restart_service
+    ;;
+
+  status)
+    show_status
+    ;;
+
+  logs)
+    shift || true
+    show_logs "${1:-}"
+    ;;
+
+  report)
+    run_report
+    ;;
+
+  tree)
+    show_tree
+    ;;
+
+  proxy)
+    shift || true
+    proxy_cmd "${1:-help}" "${2:-}"
+    ;;
+
+  help|-h|--help)
+    usage
+    ;;
+
+  runs)
+    shift || true
+    run_manual "${1:-}" "${2:-}"
+    ;;
+
+  runs=*)
+    run_manual "$cmd"
+    ;;
+
+  --runs=*)
+    run_manual "$cmd"
+    ;;
+
+  *)
+    echo "✗ Unknown command: $cmd"
+    echo
+    usage
+    exit 1
+    ;;
+esac

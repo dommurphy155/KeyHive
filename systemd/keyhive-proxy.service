@@ -1,0 +1,35 @@
+[Unit]
+Description=KeyHive Local OpenAI-Compatible Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/api_maker
+Environment=HOME=/root
+Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=KEYHIVE_PROXY_HOST=127.0.0.1
+Environment=KEYHIVE_PROXY_PORT=8787
+Environment=KEYHIVE_KEYS_FILE=/root/api_maker/data/keys.txt
+Environment=KEYHIVE_PROXY_DEFAULT_PROVIDER=hf
+Environment=KEYHIVE_PROXY_FALLBACK_PROVIDER=nvidia
+Environment=KEYHIVE_FALLBACK_ENABLED=1
+Environment=KEYHIVE_FALLBACK_PROVIDER=nvidia
+Environment=KEYHIVE_FALLBACK_ENTER_AT=0
+Environment=KEYHIVE_FALLBACK_EXIT_AT=10
+Environment=KEYHIVE_NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+Environment=KEYHIVE_PROXY_DEFAULT_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+Environment=KEYHIVE_PROXY_NVIDIA_MODEL=moonshotai/kimi-k2.6
+Environment=KEYHIVE_PROXY_RELOAD_SECONDS=10
+Environment=KEYHIVE_PROXY_REQUEST_TIMEOUT=300
+Environment=KEYHIVE_PROXY_MAX_RETRIES=2
+Environment=KEYHIVE_PROXY_DEBUG=0
+ExecStart=/root/api_maker/.venv/bin/python -m proxy.keyhive_proxy
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

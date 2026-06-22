@@ -1,0 +1,49 @@
+# KeyHive requirements
+# Generated: 2026-06-22 01:29:06
+#
+# Install Python packages with:
+#   pip install -r setup/requirements.txt
+#
+# Install Node packages with:
+#   npm install dotenv playwright
+
+# ==================================================
+# Python pip packages
+# ==================================================
+httpx
+python-dotenv
+fastapi
+uvicorn[standard]
+rich
+
+# ==================================================
+# JS / Node npm packages
+# ==================================================
+# npm: dotenv
+# npm: playwright
+
+# ==================================================
+# Python imports found
+# ==================================================
+# asyncio [stdlib/local] -> scripts/burner_email.py:10
+# datetime [stdlib/local] -> scripts/scheduler.py:9
+# dotenv [external] -> scripts/burner_email.py:19
+# httpx [external] -> scripts/burner_email.py:25
+# json [stdlib/local] -> scripts/burner_email.py:15
+# os [stdlib/local] -> scripts/burner_email.py:13
+# pathlib [stdlib/local] -> scripts/count_keys.py:3, scripts/scheduler.py:10
+# re [stdlib/local] -> scripts/burner_email.py:11
+# subprocess [stdlib/local] -> scripts/count_keys.py:4, scripts/scheduler.py:6
+# sys [stdlib/local] -> scripts/burner_email.py:14, scripts/count_keys.py:5, scripts/scheduler.py:7
+# time [stdlib/local] -> scripts/burner_email.py:12, scripts/scheduler.py:8
+# typing [stdlib/local] -> scripts/burner_email.py:16
+
+# ==================================================
+# JS imports/requires found
+# ==================================================
+# child_process [node-core] -> scripts/hc_cookie_refresh.js:5, scripts/hf_keys.js:5
+# dotenv [external] -> scripts/hc_cookie_refresh.js:10, scripts/hf_keys.js:10
+# fs [node-core] -> scripts/hc_cookie_refresh.js:6, scripts/hf_keys.js:6
+# os [node-core] -> scripts/hc_cookie_refresh.js:8, scripts/hf_keys.js:8
+# path [node-core] -> scripts/hc_cookie_refresh.js:7, scripts/hf_keys.js:7
+# playwright [external] -> scripts/hc_cookie_refresh.js:4, scripts/hf_keys.js:4

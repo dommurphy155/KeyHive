@@ -1,0 +1,75 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+data/keys.txt
+data/hc_cookie.json
+data/.agentmail_state.json
+data/.last_key_count
+keys.txt
+hc_cookie.json
+.last_key_count
+
+# Logs / dumps / screenshots
+*.log
+scripts_dump_*.txt
+fail_*.png
+/root/fail_*.png
+chrome-*.log
+
+# Backups
+backups/
+*.bak
+*.backup
+
+# Old / unused
+hc_cookie_signup.js
+
+# Keep folder structure
+!data/.gitkeep
+
+# Local AI/editor/plugin state
+.pair-programming-session.md
+.plugin-config/
+.remember/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Local test/temp clone paths
+tmp/
+
+# Local AI/editor/plugin state
+.pair-programming-session.md
+.plugin-config/
+.remember/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Local test/temp clone paths
+tmp/

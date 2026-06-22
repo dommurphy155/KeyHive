@@ -1,0 +1,460 @@
+// ~/api_maker/hf_keys.js
+"use strict";
+
+const { chromium } = require("playwright");
+const { spawn, execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const ROOT_DIR = path.resolve(__dirname, "..");
+require("dotenv").config({ path: path.join(ROOT_DIR, ".env") });
+
+// ─── Config ────────────────────────────────────────────────────────────────
+const COOKIE_PATH    = path.join(ROOT_DIR, "data", "hc_cookie.json");
+const KEYS_PATH      = path.join(ROOT_DIR, "data", "keys.txt");
+const REFRESH_SCRIPT = path.join(ROOT_DIR, "scripts", "hc_cookie_refresh.js");
+const BURNER_SCRIPT  = path.join(ROOT_DIR, "scripts", "burner_email.py");
+
+const CDP_PORT  = 9334;
+const CDP_HOST  = "127.0.0.1";
+const X_DISPLAY = ":1";
+const CHROME_LOG = "/root/chrome-9334.log";
+
+// ─── Logging ───────────────────────────────────────────────────────────────
+const ts   = () => new Date().toISOString().slice(11, 19);
+const step = (msg) => console.log(`[${ts()}] › ${msg}`);
+const ok   = (msg) => console.log(`[${ts()}] ✓ ${msg}`);
+const fail = (msg) => console.error(`[${ts()}] ✗ ${msg}`);
+const dbg  = (msg) => { if (process.env.DEBUG) console.log(`[${ts()}]   ${msg}`); };
+const warn = (msg) => console.log(`[${ts()}] ⚠ ${msg}`);
+
+const sleep      = (ms) => new Promise((r) => setTimeout(r, ms));
+const humanDelay = (min = 500, max = 1200) => sleep(min + Math.random() * (max - min));
+
+// ─── Generators ────────────────────────────────────────────────────────────
+function generatePassword() {
+  const lower   = "abcdefghijklmnopqrstuvwxyz";
+  const upper   = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const digits  = "0123456789";
+  const special = "!@#$%^&*()-_=+[]{}|;:,.<>?";
+  const all     = lower + upper + digits + special;
+
+  const guaranteed = [
+    lower[Math.floor(Math.random() * lower.length)],
+    lower[Math.floor(Math.random() * lower.length)],
+    upper[Math.floor(Math.random() * upper.length)],
+    upper[Math.floor(Math.random() * upper.length)],
+    digits[Math.floor(Math.random() * digits.length)],
+    digits[Math.floor(Math.random() * digits.length)],
+    special[Math.floor(Math.random() * special.length)],
+    special[Math.floor(Math.random() * special.length)],
+  ];
+
+  const rest = Array.from({ length: 8 }, () => all[Math.floor(Math.random() * all.length)]);
+
+  const chars = [...guaranteed, ...rest];
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+
+  return chars.join("");
+}
+
+function generateUsername() {
+  const adj  = ["swift", "dark", "neon", "cyber", "lunar", "solar", "echo", "nova"];
+  const noun = ["fox", "wolf", "hawk", "lynx", "bear", "crow", "viper", "ghost"];
+  const num  = Math.floor(Math.random() * 9000 + 1000);
+  return `${adj[Math.floor(Math.random() * adj.length)]}${noun[Math.floor(Math.random() * noun.length)]}${num}`;
+}
+
+function generateFullName() {
+  const first = ["James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda"];
+  const last  = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis"];
+  return `${first[Math.floor(Math.random() * first.length)]} ${last[Math.floor(Math.random() * last.length)]}`;
+}
+
+// ─── 1. Cookie Check ──────────────────────────────────────────────────────
+async function ensureCookies() {
+  step("Checking hc_cookie.json...");
+  let needsRefresh = false;
+
+  if (!fs.existsSync(COOKIE_PATH)) {
+    step("Cookie file missing.");
+    needsRefresh = true;
+  } else {
+    const stats = fs.statSync(COOKIE_PATH);
+    const ageMs = Date.now() - stats.mtimeMs;
+    const hours = ageMs / (1000 * 60 * 60);
+    if (hours > 24) {
+      step(`Cookie is ${hours.toFixed(1)} hours old (>24h).`);
+      needsRefresh = true;
+    } else {
+      ok(`Cookie is fresh (${hours.toFixed(1)}h old).`);
+    }
+  }
+
+  if (needsRefresh) {
+    step("Running hc_cookie_refresh.js...");
+    try {
+      execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
+      ok("Cookie refreshed.");
+    } catch (e) {
+      fail("Failed to refresh cookie.");
+      process.exit(1);
+    }
+  }
+
+  const data = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf-8"));
+  // Support both old single-cookie format and new array format
+  return Array.isArray(data) ? data : [data];
+}
+
+// ─── 2. Burner Email ──────────────────────────────────────────────────────
+function getBurnerEmail() {
+  step("Getting burner email...");
+  try {
+    const email = execSync(`python3 ${BURNER_SCRIPT} create`, { encoding: "utf-8" }).trim();
+    if (!email) throw new Error("Script returned empty email");
+    ok(`Burner email: ${email}`);
+    return email;
+  } catch (e) {
+    fail(`Failed to get burner email: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+function getConfirmationLink() {
+  step("Waiting for confirmation email...");
+  try {
+    const output = execSync(`python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" });
+    const match = output.match(/https:\/\/huggingface\.co\/[^\s"'<>]+/);
+    if (match) {
+      ok(`Found confirmation link.`);
+      return match[0];
+    }
+    if (output.trim().startsWith("http")) return output.trim();
+
+    fail("No confirmation link found in output.");
+    process.exit(1);
+  } catch (e) {
+    fail(`Failed to get confirmation link: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+function burnInbox() {
+  step("Burning burner email inbox...");
+  try {
+    execSync(`python3 ${BURNER_SCRIPT} burn`, { encoding: "utf-8" });
+    ok("Inbox burned.");
+  } catch (e) {
+    fail(`Burn failed (non-critical): ${e.message}`);
+  }
+}
+
+// ─── Port + profile utils ──────────────────────────────────────────────────
+function killPort(port) {
+  try { execSync(`fuser -k ${port}/tcp 2>/dev/null || true`); } catch {}
+}
+
+function cleanupProfile(dir) {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+}
+
+// ─── Spawn Chrome ──────────────────────────────────────────────────────────
+function launchChrome(profileDir) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "google-chrome-stable",
+      [
+        `--remote-debugging-port=${CDP_PORT}`,
+        `--remote-debugging-address=${CDP_HOST}`,
+        `--user-data-dir=${profileDir}`,
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-blink-features=AutomationControlled",
+        "--use-gl=swiftshader",
+        "--use-angle=swiftshader-webgl",
+        "--enable-webgl",
+        "--ignore-gpu-blocklist",
+        "--enable-gpu-rasterization",
+        "--window-size=1920,1080",
+        "--start-maximized",
+        "--lang=en-GB",
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+      ],
+      {
+        env:      { ...process.env, DISPLAY: X_DISPLAY },
+        detached: false,
+        stdio:    ["ignore", "pipe", "pipe"],
+      }
+    );
+
+    const logStream = fs.createWriteStream(CHROME_LOG, { flags: "a" });
+    child.stdout.pipe(logStream);
+    child.stderr.pipe(logStream);
+
+    child.on("error", (err) => reject(new Error(`Chrome spawn failed: ${err.message}`)));
+    child.on("exit",  (code, sig) => dbg(`Chrome exited (code=${code} sig=${sig})`));
+
+    let done = false;
+    const deadline = Date.now() + 15000;
+
+    const poll = setInterval(async () => {
+      if (done) return;
+      try {
+        const res = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/version`);
+        if (res.ok) {
+          done = true;
+          clearInterval(poll);
+          resolve(child);
+        }
+      } catch {
+        if (Date.now() > deadline) {
+          done = true;
+          clearInterval(poll);
+          reject(new Error("CDP never came alive within 15s"));
+        }
+      }
+    }, 300);
+  });
+}
+
+function killChrome(child) {
+  if (!child || child.killed) return;
+  try { child.kill("SIGTERM"); } catch { try { child.kill("SIGKILL"); } catch {} }
+}
+
+// ─── Main Flow ────────────────────────────────────────────────────────────
+async function main() {
+  const cookies  = await ensureCookies();
+  const email    = getBurnerEmail();
+  const password = generatePassword();
+  const username = generateUsername();
+  const fullname = generateFullName();
+
+  const profileDir  = `/tmp/chrome-hf-keys-${process.pid}`;
+  let chromeProcess = null;
+  let browser       = null;
+  let page          = null;
+
+  try {
+    step("Starting Chrome...");
+    killPort(CDP_PORT);
+    chromeProcess = await launchChrome(profileDir);
+    ok("Chrome ready");
+
+    step("Connecting via CDP...");
+    browser = await chromium.connectOverCDP(`http://${CDP_HOST}:${CDP_PORT}`);
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+
+    step("Injecting hc_cookies...");
+    await context.addCookies(cookies.map(c => ({
+      name:     c.name,
+      value:    c.value,
+      domain:   c.domain.startsWith(".") ? c.domain : `.${c.domain}`,
+      path:     c.path || "/",
+      ...(c.expires && c.expires > 0 ? { expires: c.expires } : {}),
+      httpOnly: c.httpOnly || false,
+      secure:   c.secure   || false,
+      sameSite: c.sameSite || "None",
+    })));
+
+    page = context.pages()[0] ?? (await context.newPage());
+
+    // ── 3. Register on HF ──────────────────────────────────────────────────
+    step("Navigating to Hugging Face join page...");
+    await page.goto("https://huggingface.co/join", { waitUntil: "networkidle" });
+
+    step("Filling email...");
+    await page.locator('input[name="email"][type="email"]').type(email, { delay: 100 });
+    await humanDelay();
+
+    step("Filling password...");
+    await page.locator('input[name="password"][type="password"]').fill(password);
+    await humanDelay();
+
+    step("Clicking Next...");
+    await page.locator('button[type="submit"]').filter({ hasText: "Next" }).click();
+    await page.waitForLoadState("networkidle");
+    await humanDelay(1000, 2000);
+
+    step("Filling username...");
+    await page.locator('input[name="username"]').fill(username);
+    await humanDelay();
+
+    step("Filling full name...");
+    await page.locator('input[name="fullname"]').fill(fullname);
+    await humanDelay();
+
+    step("Verifying cookies in session...");
+    const sessionCookies = await context.cookies();
+    const hasHcCookie = cookies.some(hc =>
+      sessionCookies.some(sc => sc.name === hc.name)
+    );
+    if (!hasHcCookie) {
+      fail("hc_cookie not found in session!");
+      process.exit(1);
+    }
+    ok(`Cookie verified in session (${cookies.length} injected).`);
+
+    step("Checking terms checkbox...");
+    const checkbox = page.locator('input[type="checkbox"]').first();
+    if (!(await checkbox.isChecked())) {
+      await checkbox.check();
+    }
+    await humanDelay();
+
+    step("Clicking Create Account...");
+    const createBtn = page.locator('button[type="submit"]').filter({ hasText: "Create Account" });
+    const createBtnCount = await createBtn.count();
+    if (createBtnCount === 0) throw new Error("Create Account button not found");
+    await createBtn.first().scrollIntoViewIfNeeded();
+    await humanDelay(300, 600);
+    await createBtn.first().click();
+    step("Create Account clicked — waiting for response...");
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+    await humanDelay(2000, 3000);
+
+    // ── 4. Confirm Email (with captcha fallback) ─────────────────────────────
+    step("Polling for confirmation email (60s)...");
+    let confirmLink = null;
+    try {
+      confirmLink = execSync(`timeout 60 python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" }).trim();
+      const match = confirmLink.match(/https:\/\/huggingface\.co\/[^\s"'<>]+/);
+      confirmLink = match ? match[0] : (confirmLink.startsWith("http") ? confirmLink : null);
+    } catch {
+      confirmLink = null;
+    }
+
+    if (!confirmLink) {
+      warn("No confirmation email in 7s — likely hCaptcha. Refreshing cookies...");
+      await browser.close();
+      killChrome(chromeProcess);
+      cleanupProfile(profileDir);
+      burnInbox();
+
+      step("Running hc_cookie_refresh.js...");
+      try {
+        execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
+        ok("Cookies refreshed. Retrying HF flow...");
+      } catch (e) {
+        fail("Cookie refresh failed.");
+        process.exit(1);
+      }
+
+      return "RETRY";
+    }
+
+    ok("Found confirmation link.");
+    step("Navigating to confirmation link...");
+    try {
+      await page.goto(confirmLink, { waitUntil: "networkidle" });
+} catch (err) {
+  if (!err.message.includes("interrupted by another navigation")) throw err;
+  // HF redirects mid-load — expected, let it settle
+  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+}
+await page.waitForURL(/huggingface\.co\/(users|settings|email_confirmation)/, { timeout: 15000 }).catch(() => {});
+await humanDelay(2000, 4000);
+ok("Email confirmed.");
+
+    // ── 5. Create Token ────────────────────────────────────────────────────
+   step("Navigating to token creation page...");
+   await page.goto("https://huggingface.co/settings/tokens/new?tokenType=write", { waitUntil: "domcontentloaded" });
+   await page.locator('input[name="displayName"]').waitFor({ state: "visible", timeout: 15000 });
+   await humanDelay(500, 1000);
+
+   step("Filling token name...");
+   await page.locator('input[name="displayName"]').fill(`token_${Date.now()}`);
+   await humanDelay();
+
+      step("Clicking Create token...");
+    for (const sel of [
+      'button[type="submit"].btn-lg',
+      'button.btn-lg[type="submit"]',
+      'button:has-text("Create token")',
+      'button[type="submit"]',
+    ]) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.count() > 0 && await el.isVisible()) {
+          await el.click();
+          step("Create token submitted");
+          break;
+        }
+      } catch {}
+    }
+
+    // Let the page fully settle after submit
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+    await sleep(2000);
+
+    // ── 6. Extract Key ─────────────────────────────────────────────────────
+    step("Extracting HF token...");
+    let hfKey = null;
+
+    for (let attempt = 0; attempt < 20 && !hfKey; attempt++) {
+      await sleep(1000);
+
+      // Method 1 — readonly / text inputs (most reliable)
+      try {
+        const inputs = await page.locator('input[readonly], input[type="text"]').all();
+        for (const inp of inputs) {
+          const val = await inp.inputValue().catch(() => "");
+          if (val.startsWith("hf_") && val.length > 20) {
+            hfKey = val;
+            break;
+          }
+        }
+      } catch {}
+
+      if (hfKey) break;
+
+      // Method 2 — regex scan page HTML, skip false positives
+      try {
+        const content = await page.content();
+        for (const m of content.matchAll(/hf_[a-zA-Z0-9_-]{20,}/g)) {
+          const candidate = m[0];
+          const pos = m.index;
+          const surrounding = content.slice(Math.max(0, pos - 20), pos + candidate.length + 20);
+          if (['src=', 'href=', 'url(', '.js"', '.css"'].some(x => surrounding.includes(x))) continue;
+          hfKey = candidate;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!hfKey) {
+      fail("Could not extract HF token.");
+      await page.screenshot({ path: "/root/fail_hf_token.png", fullPage: true });
+      process.exit(1);
+    }
+
+    ok(`Token extracted: ${hfKey.substring(0, 10)}...`);
+
+    // ── 7. Save Key ────────────────────────────────────────────────────────
+    fs.appendFileSync(KEYS_PATH, `${hfKey}\n`);
+    ok(`Saved to ${KEYS_PATH}`);
+
+    // ── 8. Burn the inbox ──────────────────────────────────────────────────
+    burnInbox();
+
+  } catch (err) {
+    fail(`Error: ${err.message}`);
+    if (page) {
+      try { await page.screenshot({ path: "/root/fail_hf_flow.png", fullPage: true }); } catch {}
+    }
+    burnInbox();
+    process.exit(1);
+  } finally {
+    if (browser) { try { await browser.close(); } catch {} }
+    killChrome(chromeProcess);
+    cleanupProfile(profileDir);
+  }
+}
+
+main();

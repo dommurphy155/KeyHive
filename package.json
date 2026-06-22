@@ -1,0 +1,14 @@
+{
+  "name": "api_maker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "KeyHive automation scripts for Hugging Face key generation.",
+  "scripts": {
+    "check": "node --check scripts/hf_keys.js && node --check scripts/hc_cookie_refresh.js",
+    "run": "node scripts/hf_keys.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  }
+}

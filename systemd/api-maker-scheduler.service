@@ -1,0 +1,20 @@
+[Unit]
+Description=API Maker Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/api_maker
+Environment=HOME=/root
+Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DISPLAY=:1
+ExecStart=/usr/bin/python3 /root/api_maker/scripts/scheduler.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
