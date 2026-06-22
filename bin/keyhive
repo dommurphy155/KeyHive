@@ -8,7 +8,9 @@ SYSTEMD_DIR="$ROOT_DIR/systemd"
 
 SERVICE="${KEYHIVE_SERVICE:-api-maker-scheduler.service}"
 PROXY_SERVICE="${KEYHIVE_PROXY_SERVICE:-keyhive-proxy.service}"
+WEB_SERVICE="${KEYHIVE_WEB_SERVICE:-keyhive-web.service}"
 PROXY_URL="${KEYHIVE_PROXY_URL:-http://127.0.0.1:8787}"
+WEB_URL="${KEYHIVE_WEB_URL:-http://127.0.0.1:8080}"
 
 HF_KEYS_JS="$SCRIPTS_DIR/hf_keys.js"
 COUNT_KEYS_PY="$SCRIPTS_DIR/count_keys.py"
@@ -80,6 +82,13 @@ usage() {
   row "proxy fallback" "Show fallback provider status"
   row "proxy test" "Send a tiny test request through the proxy"
 
+  section "WEB"
+  row "web start" "Start KeyHive Web UI"
+  row "web stop" "Stop KeyHive Web UI"
+  row "web restart" "Restart KeyHive Web UI"
+  row "web status" "Show Web UI service status and health"
+  row "web logs" "Show recent Web UI logs"
+
   section "OTHER"
   row "doctor" "Run local diagnostics"
   row "tree" "Show a clean project tree"
@@ -88,6 +97,7 @@ usage() {
   section "SERVICES"
   printf "  Scanner: %s\n" "$SERVICE"
   printf "  Proxy:   %s\n" "$PROXY_SERVICE"
+  printf "  Web:     %s\n" "$WEB_SERVICE"
 
   section "PROJECT"
   printf "  %s\n" "$ROOT_DIR"
@@ -118,6 +128,10 @@ service_exists() {
 
 proxy_service_exists() {
   systemctl list-unit-files "$PROXY_SERVICE" >/dev/null 2>&1
+}
+
+web_service_exists() {
+  systemctl list-unit-files "$WEB_SERVICE" >/dev/null 2>&1
 }
 
 start_service() {
@@ -253,6 +267,28 @@ show_proxy_logs() {
   fi
 }
 
+show_web_logs() {
+  lines="120"
+  follow="false"
+
+  if [ "${1:-}" = "-f" ] || [ "${1:-}" = "--follow" ]; then
+    follow="true"
+  elif [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    lines="$1"
+  fi
+
+  if ! web_service_exists; then
+    echo "✗ Systemd service not found: $WEB_SERVICE"
+    exit 1
+  fi
+
+  if [ "$follow" = "true" ]; then
+    journalctl -u "$WEB_SERVICE" -b -f -o cat
+  else
+    journalctl -u "$WEB_SERVICE" -b -n "$lines" -o cat --no-pager
+  fi
+}
+
 run_report() {
   if [ ! -f "$COUNT_KEYS_PY" ]; then
     echo "✗ Missing report script: $COUNT_KEYS_PY" >&2
@@ -338,7 +374,7 @@ show_tree() {
     exit 1
   fi
 
-  tree -a -I '.git|.env|.env.*|.venv|venv|env|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|.pair-programming-session.md|.plugin-config|.remember|logs|keys.txt|hc_cookie.json|run_stats.json|run_stats.lock|.agentmail_state.json|.last_key_count|fail_*.png|chrome-*.log|*.log'
+  tree -a -I '.git|.agents|.codex|.env|.env.*|.venv|venv|env|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|.pair-programming-session.md|.plugin-config|.remember|logs|keys.txt|hc_cookie.json|run_stats.json|run_stats.lock|.agentmail_state.json|.last_key_count|fail_*.png|chrome-*.log|*.log'
 }
 
 doctor_ok() {
@@ -795,6 +831,88 @@ proxy_cmd() {
   esac
 }
 
+web_start() {
+  if ! web_service_exists; then
+    echo "✗ Systemd service not found: $WEB_SERVICE"
+    echo "Expected service file around:"
+    echo "  /etc/systemd/system/$WEB_SERVICE"
+    echo "  $SYSTEMD_DIR/$WEB_SERVICE"
+    exit 1
+  fi
+
+  systemctl start "$WEB_SERVICE"
+  echo "✓ keyhive web started"
+  systemctl status "$WEB_SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+web_stop() {
+  if ! web_service_exists; then
+    echo "✗ Systemd service not found: $WEB_SERVICE"
+    exit 1
+  fi
+
+  systemctl stop "$WEB_SERVICE"
+  echo "✓ keyhive web stopped"
+}
+
+web_restart() {
+  if ! web_service_exists; then
+    echo "✗ Systemd service not found: $WEB_SERVICE"
+    exit 1
+  fi
+
+  systemctl restart "$WEB_SERVICE"
+  echo "✓ keyhive web restarted"
+  systemctl status "$WEB_SERVICE" --no-pager -l | sed -n '1,12p'
+}
+
+web_status() {
+  section "KEYHIVE WEB"
+  printf "  %-12s %s\n" "Service:" "$WEB_SERVICE"
+  printf "  %-12s %s\n\n" "URL:" "$WEB_URL"
+
+  if web_service_exists; then
+    systemctl status "$WEB_SERVICE" --no-pager -l | sed -n '1,12p'
+  else
+    printf "  %-12s missing\n" "Service:"
+  fi
+
+  section "HEALTH"
+  curl_json "$WEB_URL/api/status" || true
+}
+
+web_cmd() {
+  subcmd="${1:-help}"
+  shift || true
+
+  case "$subcmd" in
+    start)
+      web_start
+      ;;
+    stop)
+      web_stop
+      ;;
+    restart)
+      web_restart
+      ;;
+    status)
+      web_status
+      ;;
+    logs)
+      show_web_logs "${1:-}"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      echo "✗ Unknown web command: $subcmd"
+      echo
+      usage
+      exit 1
+      ;;
+  esac
+}
+
 cmd="${1:-help}"
 
 case "$cmd" in
@@ -834,6 +952,11 @@ case "$cmd" in
   proxy)
     shift || true
     proxy_cmd "${1:-help}" "${2:-}"
+    ;;
+
+  web)
+    shift || true
+    web_cmd "${1:-help}" "${2:-}"
     ;;
 
   help|-h|--help)

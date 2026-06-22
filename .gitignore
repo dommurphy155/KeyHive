@@ -38,6 +38,7 @@ hc_cookie.json
 # Logs / dumps / screenshots
 logs/
 *.log
+web_ui/**/*.log
 scripts_dump_*.txt
 fail_*.png
 /root/fail_*.png
@@ -61,3 +62,15 @@ hc_cookie_signup.js
 
 # Local test/temp clone paths
 tmp/
+
+# Web UI generated files
+web_ui/front_end/node_modules/
+web_ui/front_end/dist/
+web_ui/front_end/.vite/
+web_ui/front_end/.next/
+web_ui/front_end/build/
+web_ui/back_end/__pycache__/
+web_ui/back_end/*.pyc
+web_ui/back_end/**/*.pyc
+web_ui/**/.env
+web_ui/**/.env.*

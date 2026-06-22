@@ -79,7 +79,8 @@ The installer will:
 - check OS, package manager, Python, Node/npm, Chrome/Chromium, systemd, and project paths;
 - create runtime files under `data/`;
 - install Node dependencies and Playwright Chromium where available;
-- install scanner/proxy systemd units where permissions allow;
+- prepare the Web UI folders and runtime paths;
+- install scanner/proxy/Web UI systemd units where permissions allow;
 - prompt for AgentMail, NVIDIA, and Gmail credentials in that order;
 - save `.env` safely with `chmod 600`;
 - configure Claude Code to use the local KeyHive proxy.
@@ -95,6 +96,7 @@ Then start the scanner and proxy:
 ```bash
 keyhive start
 keyhive proxy start
+keyhive web start
 keyhive proxy test
 ```
 
@@ -137,10 +139,14 @@ Optional systemd setup:
 
 ```bash
 sudo cp systemd/api-maker-scheduler.service /etc/systemd/system/api-maker-scheduler.service
+sudo cp systemd/keyhive-proxy.service /etc/systemd/system/keyhive-proxy.service
+sudo cp systemd/keyhive-web.service /etc/systemd/system/keyhive-web.service
 sudo systemctl daemon-reload
 sudo systemctl enable api-maker-scheduler.service
 sudo systemctl start api-maker-scheduler.service
 ```
+
+The current Web UI frontend is static HTML/CSS/JS. There is no `web_ui/front_end/package.json` yet, so there are no frontend Node dependencies to install for it. The Web UI backend uses the existing Python requirements from `setup/requirements.txt`.
 
 ## Environment Variables
 
@@ -165,6 +171,9 @@ Create `.env` in the project root. The installer does this interactively and saf
 | `KEYHIVE_PROXY_NVIDIA_MODEL` | No | Proxy | Defaults to `moonshotai/kimi-k2.6` |
 | `DEBUG` | No | Node scripts | Any non-empty value enables extra logs |
 | `KEYHIVE_SERVICE` | No | `bin/keyhive` | Overrides `api-maker-scheduler.service` |
+| `KEYHIVE_WEB_HOST` | No | Web UI | Defaults to `0.0.0.0` |
+| `KEYHIVE_WEB_PORT` | No | Web UI | Defaults to `8080` |
+| `KEYHIVE_WEB_SERVICE` | No | `bin/keyhive` | Overrides `keyhive-web.service` |
 
 Example shape only:
 
@@ -201,6 +210,11 @@ keyhive help
 | `keyhive proxy stats` | Show `/stats`. |
 | `keyhive proxy fallback` | Show fallback provider status. |
 | `keyhive proxy test` | Send a tiny local chat completion request. |
+| `keyhive web start` | Start the public Web UI service on port `8080`. |
+| `keyhive web stop` | Stop the Web UI service. |
+| `keyhive web restart` | Restart the Web UI service. |
+| `keyhive web status` | Show Web UI service status and `/api/status`. |
+| `keyhive web logs` | Show recent Web UI service logs. |
 | `keyhive doctor` | Run diagnostics for env, deps, services, proxy, and Claude config. |
 | `keyhive tree` | Show a clean project tree without install/runtime noise. |
 
@@ -316,6 +330,51 @@ KEYHIVE_PROXY_NVIDIA_MODEL=moonshotai/kimi-k2.6
 
 Do not bind this to `0.0.0.0` unless you add real auth and firewalling. Local-only is the sane default.
 
+## KeyHive Web UI
+
+KeyHive Web UI is a small FastAPI app that serves a static black-background dashboard and same-origin `/api/*` endpoints. It runs publicly on:
+
+```text
+http://YOUR_SERVER_IP:8080
+```
+
+The Web UI currently has no auth. That is temporary and unsafe for long-term public exposure. Put it behind auth and firewall rules before treating it as anything other than an operator-only control surface.
+
+Install and run through systemd:
+
+```bash
+sudo cp systemd/keyhive-web.service /etc/systemd/system/keyhive-web.service
+sudo systemctl daemon-reload
+keyhive web start
+keyhive web status
+```
+
+Manual run:
+
+```bash
+cd /root/api_maker
+python3 -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
+```
+
+Pages:
+
+- Dashboard: scanner/proxy/key/cookie/provider/run overview.
+- Scanner: scanner service state and start/stop/restart controls.
+- Proxy: proxy health, provider/fallback stats, and start/stop/restart controls.
+- Logs: scanner and proxy logs with selectable line counts.
+- Stats: since-restart runs, all-time runs, failure points, key stats, and proxy stats.
+- Settings: paths, ports, service names, runtime files, and auth warning.
+
+Useful API checks:
+
+```bash
+curl http://127.0.0.1:8080/api/status
+curl http://127.0.0.1:8080/api/scanner/status
+curl http://127.0.0.1:8080/api/proxy/status
+curl http://127.0.0.1:8080/api/proxy/stats
+curl http://127.0.0.1:8080/api/logs/scanner
+```
+
 Claude Code shell config is managed by the installer:
 
 ```bash
@@ -414,13 +473,18 @@ api_maker/
 │   └── requirements.txt
 ├── systemd/
 │   ├── api-maker-scheduler.service
+│   ├── keyhive-web.service
 │   └── keyhive-proxy.service
 ├── web_ui/
 │   ├── WEB_UI_PLAN.md
 │   ├── back_end/
-│   │   └── .gitkeep
+│   │   ├── app.py
+│   │   ├── README.md
+│   │   └── services/
 │   └── front_end/
-│       └── .gitkeep
+│       ├── app.js
+│       ├── index.html
+│       └── styles.css
 ├── .env                      # local secrets, ignored
 └── .gitignore
 ```

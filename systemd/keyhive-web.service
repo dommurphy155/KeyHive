@@ -1,0 +1,21 @@
+[Unit]
+Description=KeyHive Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/api_maker
+Environment=HOME=/root
+Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=KEYHIVE_WEB_HOST=0.0.0.0
+Environment=KEYHIVE_WEB_PORT=8080
+ExecStart=/root/api_maker/.venv/bin/python -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

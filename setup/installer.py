@@ -24,6 +24,9 @@ DATA_DIR = PROJECT_DIR / "data"
 ENV_FILE = PROJECT_DIR / ".env"
 VENV_DIR = PROJECT_DIR / ".venv"
 SYSTEMD_DIR = PROJECT_DIR / "systemd"
+WEB_UI_DIR = PROJECT_DIR / "web_ui"
+WEB_FRONTEND_DIR = WEB_UI_DIR / "front_end"
+WEB_BACKEND_DIR = WEB_UI_DIR / "back_end"
 PACKAGE_JSON = PROJECT_DIR / "package.json"
 KEYHIVE_BIN = PROJECT_DIR / "bin" / "keyhive"
 GLOBAL_KEYHIVE = Path("/usr/local/bin/keyhive")
@@ -132,7 +135,11 @@ def check_environment() -> None:
 def ensure_runtime_files() -> None:
     console.print("[bold cyan]Runtime files[/bold cyan]")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (PROJECT_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    WEB_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_BACKEND_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "keys.txt").touch(exist_ok=True)
+    (DATA_DIR / "run_stats.lock").touch(exist_ok=True)
     if not (DATA_DIR / "hc_cookie.json").exists():
         (DATA_DIR / "hc_cookie.json").write_text("[]\n")
     ENV_FILE.touch(exist_ok=True)
@@ -174,6 +181,19 @@ def install_node_runtime() -> None:
     console.print("[green]Node dependencies ready[/green]")
 
 
+def install_web_ui_runtime() -> None:
+    console.print("[bold cyan]Web UI runtime[/bold cyan]")
+    WEB_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
+    WEB_BACKEND_DIR.mkdir(parents=True, exist_ok=True)
+    frontend_package = WEB_FRONTEND_DIR / "package.json"
+    if frontend_package.exists() and have("npm"):
+        run(["npm", "install"], cwd=WEB_FRONTEND_DIR, check=True)
+        console.print("[green]Web frontend dependencies ready[/green]")
+    else:
+        console.print("[green]Web frontend is static; no npm install needed.[/green]")
+    console.print("[green]Web backend uses existing Python requirements.[/green]")
+
+
 def install_systemd_units() -> None:
     console.print("[bold cyan]Systemd services[/bold cyan]")
     if not have("systemctl") or not Path("/etc/systemd/system").exists():
@@ -184,7 +204,7 @@ def install_systemd_units() -> None:
         return
 
     prefix = [] if os.geteuid() == 0 else ["sudo"]
-    for unit in ("api-maker-scheduler.service", "keyhive-proxy.service"):
+    for unit in ("api-maker-scheduler.service", "keyhive-proxy.service", "keyhive-web.service"):
         src = SYSTEMD_DIR / unit
         if src.exists():
             run(prefix + ["cp", str(src), f"/etc/systemd/system/{unit}"])
@@ -305,6 +325,9 @@ def configure_proxy_env_defaults() -> None:
         "KEYHIVE_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1/chat/completions",
         "KEYHIVE_PROXY_DEFAULT_MODEL": "zai-org/GLM-5.2",
         "KEYHIVE_PROXY_NVIDIA_MODEL": "moonshotai/kimi-k2.6",
+        "KEYHIVE_WEB_HOST": "0.0.0.0",
+        "KEYHIVE_WEB_PORT": "8080",
+        "KEYHIVE_WEB_SERVICE": "keyhive-web.service",
     }
     env = load_env()
     set_env_values({key: env.get(key, value) for key, value in defaults.items()})
@@ -363,8 +386,11 @@ def final_message() -> None:
             "keyhive proxy start\n"
             "keyhive proxy test\n"
             "keyhive proxy stats\n"
+            "keyhive web start\n"
+            "keyhive web status\n"
             "keyhive logs -f\n"
-            "keyhive proxy logs -f",
+            "keyhive proxy logs -f\n"
+            "keyhive web logs",
             border_style="green",
         )
     )
@@ -375,6 +401,7 @@ def main() -> None:
     check_environment()
     ensure_runtime_files()
     install_node_runtime()
+    install_web_ui_runtime()
     install_cli()
     install_systemd_units()
     prompt_agentmail()
