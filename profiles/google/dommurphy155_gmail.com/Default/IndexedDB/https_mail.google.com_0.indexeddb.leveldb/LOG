@@ -1,0 +1,6 @@
+2026/06/22-22:44:55.591 38d9ec Reusing MANIFEST /root/api_maker/profiles/google/dommurphy155_gmail.com/Default/IndexedDB/https_mail.google.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/06/22-22:44:55.592 38d9ec Recovering log #7
+2026/06/22-22:44:55.621 38d9ec Reusing old log /root/api_maker/profiles/google/dommurphy155_gmail.com/Default/IndexedDB/https_mail.google.com_0.indexeddb.leveldb/000007.log 
+2026/06/22-22:45:00.645 38d9ec Level-0 table #13: started
+2026/06/22-22:45:00.687 38d9ec Level-0 table #13: 3055607 bytes OK
+2026/06/22-22:45:00.704 38d9ec Delete type=0 #7

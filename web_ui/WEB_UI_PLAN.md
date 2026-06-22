@@ -23,6 +23,9 @@ The Web UI uses same-origin API calls, so there is no browser-side CORS dependen
 
 ## API Endpoints
 
+- `GET /login`
+- `GET /api/auth/config`
+- `POST /api/auth/login`
 - `GET /api/status`
 - `GET /api/scanner/status`
 - `GET /api/proxy/status`
@@ -30,9 +33,14 @@ The Web UI uses same-origin API calls, so there is no browser-side CORS dependen
 - `GET /api/proxy/fallback`
 - `GET /api/logs/scanner`
 - `GET /api/logs/proxy`
+- `GET /api/logs/scanner/stream`
+- `GET /api/logs/proxy/stream`
+- `GET /api/failures/recent`
+- `GET /api/failures/{category}`
 - `GET /api/keys/stats`
 - `GET /api/runs/stats`
 - `GET /api/settings`
+- `POST /api/settings`
 - `POST /api/scanner/start`
 - `POST /api/scanner/stop`
 - `POST /api/scanner/restart`
@@ -51,9 +59,17 @@ The Web UI uses same-origin API calls, so there is no browser-side CORS dependen
 
 ## Not Yet / Safety
 
-- No auth yet. This must not be exposed long-term without authentication and firewalling.
+- Login page and auth probe exist, but the dashboard/API routes are not protected yet. This must not be exposed long-term without authentication and firewalling.
 - No manual one-off scanner run button yet; the existing manual run drives browser automation and is not a good unauthenticated web action.
-- No live log streaming; the current UI uses refreshable recent-log reads.
+- Live logs use same-origin SSE streams. Initial log reads are still available for history/backfill.
+- Settings edits are limited to a whitelist of safe proxy/model runtime keys. Secrets are masked and not editable through the Web UI.
+
+## Auth Prep
+
+- Auth planning files live in `web_ui/auth/`.
+- Login page lives at `/login`.
+- `KEYHIVE_WEB_PASSWORD` or `KEYHIVE_WEB_AUTH_TOKEN` can be configured in `.env`.
+- Current login endpoint validates the configured secret but does not issue a protective session yet.
 
 ## Install Notes
 

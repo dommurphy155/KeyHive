@@ -25,6 +25,7 @@
           <div>
             <p class="eyebrow">KeyHive</p>
             <h1 id="page-title">Dashboard</h1>
+            <p id="page-subtitle" class="page-subtitle">Scanner, proxy, keys, and runtime health.</p>
           </div>
           <div class="topbar-actions">
             <span id="last-refresh" class="muted">Not loaded</span>
@@ -40,12 +41,12 @@
 
         <section id="dashboard" class="page active">
           <div class="grid metrics">
-            <article class="card metric"><span>Scanner</span><strong id="dash-scanner">...</strong></article>
-            <article class="card metric"><span>Proxy</span><strong id="dash-proxy">...</strong></article>
-            <article class="card metric"><span>Keys</span><strong id="dash-keys">...</strong></article>
-            <article class="card metric"><span>Cookie Age</span><strong id="dash-cookie">...</strong></article>
-            <article class="card metric"><span>Provider</span><strong id="dash-provider">...</strong></article>
-            <article class="card metric"><span>Fallback</span><strong id="dash-fallback">...</strong></article>
+            <article class="card metric"><span>Scanner</span><strong id="dash-scanner" class="skeleton">...</strong><small id="dash-scanner-sub">service</small></article>
+            <article class="card metric"><span>Proxy</span><strong id="dash-proxy" class="skeleton">...</strong><small id="dash-proxy-sub">service</small></article>
+            <article class="card metric"><span>Keys</span><strong id="dash-keys" class="skeleton">...</strong><small>saved tokens</small></article>
+            <article class="card metric"><span>Cookie Age</span><strong id="dash-cookie" class="skeleton">...</strong><small>hCaptcha cache</small></article>
+            <article class="card metric"><span>Provider</span><strong id="dash-provider" class="skeleton">...</strong><small>current route</small></article>
+            <article class="card metric"><span>Fallback</span><strong id="dash-fallback" class="skeleton">...</strong><small>NVIDIA backup</small></article>
           </div>
 
           <div class="grid two">
@@ -62,6 +63,17 @@
               <div id="recent-failures" class="failure-list"></div>
             </article>
           </div>
+
+          <div class="grid two">
+            <article class="panel">
+              <h2>Since Restart</h2>
+              <div id="dash-since-summary" class="compact-stats"></div>
+            </article>
+            <article class="panel">
+              <h2>All Time</h2>
+              <div id="dash-all-time-summary" class="compact-stats"></div>
+            </article>
+          </div>
         </section>
 
         <section id="scanner" class="page">
@@ -70,12 +82,22 @@
               <h2>Scanner Service</h2>
               <div class="button-row">
                 <button class="button" data-action="scanner/start">Start</button>
-                <button class="button danger" data-action="scanner/stop">Stop</button>
-                <button class="button" data-action="scanner/restart">Restart</button>
+                <button class="button danger" data-action="scanner/stop" data-confirm="Stop the scanner service?">Stop</button>
+                <button class="button" data-action="scanner/restart" data-confirm="Restart the scanner service?">Restart</button>
                 <button class="button disabled" disabled title="Manual browser run is intentionally not exposed yet">Run Once</button>
               </div>
             </div>
             <dl id="scanner-details" class="details wide"></dl>
+            <div class="subgrid">
+              <div>
+                <h3>Run Stats</h3>
+                <div id="scanner-run-summary" class="compact-stats"></div>
+              </div>
+              <div>
+                <h3>Failure Points</h3>
+                <div id="scanner-failure-summary" class="failure-list compact"></div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -85,8 +107,8 @@
               <h2>Proxy Service</h2>
               <div class="button-row">
                 <button class="button" data-action="proxy/start">Start</button>
-                <button class="button danger" data-action="proxy/stop">Stop</button>
-                <button class="button" data-action="proxy/restart">Restart</button>
+                <button class="button danger" data-action="proxy/stop" data-confirm="Stop the proxy service?">Stop</button>
+                <button class="button" data-action="proxy/restart" data-confirm="Restart the proxy service?">Restart</button>
               </div>
             </div>
             <dl id="proxy-details" class="details wide"></dl>
@@ -105,6 +127,9 @@
                   <option>500</option>
                 </select>
                 <button id="refresh-logs" class="button secondary">Refresh Logs</button>
+                <button id="stream-toggle" class="button secondary">Pause Stream</button>
+                <button id="jump-latest" class="button secondary">Latest</button>
+                <button id="copy-logs" class="button secondary">Copy</button>
               </div>
             </div>
             <div class="tabs">
@@ -112,11 +137,12 @@
               <button class="tab" data-log="proxy">Proxy</button>
             </div>
             <pre id="log-output" class="log-output">Loading logs...</pre>
+            <p id="log-meta" class="muted log-meta">Logs are masked for emails and token-looking strings.</p>
           </div>
         </section>
 
         <section id="stats" class="page">
-          <div class="grid two">
+          <div class="grid two stats-grid">
             <article class="panel">
               <h2>Since Restart</h2>
               <dl id="since-stats" class="details wide"></dl>
@@ -126,7 +152,7 @@
               <dl id="all-time-stats" class="details wide"></dl>
             </article>
           </div>
-          <div class="grid two">
+          <div class="grid two stats-grid">
             <article class="panel">
               <h2>Key Stats</h2>
               <dl id="key-stats" class="details wide"></dl>
@@ -139,10 +165,17 @@
         </section>
 
         <section id="settings" class="page">
-          <div class="panel">
-            <h2>Settings</h2>
-            <dl id="settings-details" class="details wide"></dl>
-          </div>
+          <form id="settings-form" class="settings-form">
+            <div class="section-head">
+              <h2>Settings</h2>
+              <div class="button-row">
+                <button id="save-settings" class="button" type="submit">Save Settings</button>
+                <button id="restart-proxy-after-save" class="button secondary" type="button">Restart Proxy</button>
+              </div>
+            </div>
+            <p id="settings-feedback" class="muted">Only safe, whitelisted runtime settings are editable. Secrets are masked.</p>
+            <div id="settings-sections" class="settings-grid"></div>
+          </form>
         </section>
       </main>
     </div>

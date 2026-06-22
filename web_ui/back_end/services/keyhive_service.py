@@ -5,7 +5,9 @@ import os
 import re
 import subprocess
 import time
+import asyncio
 from pathlib import Path
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -18,6 +20,8 @@ COOKIE_FILE = DATA_DIR / "hc_cookie.json"
 RUN_STATS_FILE = DATA_DIR / "run_stats.json"
 RUN_STATS_SCRIPT = ROOT_DIR / "scripts" / "run_stats.py"
 SCANNER_LOG_FILE = LOG_DIR / "keyhive-scanner.log"
+ENV_FILE = ROOT_DIR / ".env"
+PROXY_UNIT_FILE = ROOT_DIR / "systemd" / "keyhive-proxy.service"
 
 SCANNER_SERVICE = os.getenv("KEYHIVE_SERVICE", "api-maker-scheduler.service")
 PROXY_SERVICE = os.getenv("KEYHIVE_PROXY_SERVICE", "keyhive-proxy.service")
@@ -29,6 +33,32 @@ MAX_LOG_LINES = 500
 SERVICE_ACTIONS = {"start", "stop", "restart"}
 EMAIL_RE = re.compile(r"([A-Za-z0-9._%+-]{2})[A-Za-z0-9._%+-]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})")
 HF_TOKEN_RE = re.compile(r"hf_[A-Za-z0-9_-]{8,}")
+ENV_LINE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+FAILURE_KEYWORDS = {
+    "cookie_failures": ["cookie", "captcha", "hcaptcha", "hc_cookie"],
+    "selector_failures": ["selector", "locator", "element", "waiting for selector"],
+    "timeouts": ["timeout", "timed out"],
+    "email_failures": ["email", "agentmail", "inbox", "confirmation"],
+    "token_failures": ["token", "api key", "access token"],
+    "unknown_failures": ["error", "failed", "exception"],
+}
+
+SETTING_SCHEMA: dict[str, dict[str, Any]] = {
+    "KEYHIVE_PROXY_HOST": {"label": "Proxy host", "section": "proxy", "type": "text", "default": "127.0.0.1", "restart": "proxy"},
+    "KEYHIVE_PROXY_PORT": {"label": "Proxy port", "section": "proxy", "type": "int", "min": 1, "max": 65535, "default": "8787", "restart": "proxy"},
+    "KEYHIVE_PROXY_DEFAULT_PROVIDER": {"label": "Default provider", "section": "models", "type": "select", "options": ["hf", "nvidia"], "default": "hf", "restart": "proxy"},
+    "KEYHIVE_PROXY_FALLBACK_PROVIDER": {"label": "Fallback provider", "section": "models", "type": "select", "options": ["nvidia"], "default": "nvidia", "restart": "proxy"},
+    "KEYHIVE_FALLBACK_ENABLED": {"label": "Fallback enabled", "section": "models", "type": "bool", "default": "1", "restart": "proxy"},
+    "KEYHIVE_FALLBACK_ENTER_AT": {"label": "Fallback enter threshold", "section": "models", "type": "int", "min": 0, "max": 100000, "default": "0", "restart": "proxy"},
+    "KEYHIVE_FALLBACK_EXIT_AT": {"label": "Fallback exit threshold", "section": "models", "type": "int", "min": 0, "max": 100000, "default": "10", "restart": "proxy"},
+    "KEYHIVE_PROXY_DEFAULT_MODEL": {"label": "Hugging Face default model", "section": "models", "type": "text", "default": "zai-org/GLM-5.2", "restart": "proxy"},
+    "KEYHIVE_PROXY_NVIDIA_MODEL": {"label": "NVIDIA fallback model", "section": "models", "type": "text", "default": "moonshotai/kimi-k2.6", "restart": "proxy"},
+    "KEYHIVE_PROXY_RELOAD_SECONDS": {"label": "Key reload seconds", "section": "proxy", "type": "int", "min": 1, "max": 3600, "default": "5", "restart": "proxy"},
+    "KEYHIVE_PROXY_REQUEST_TIMEOUT": {"label": "Request timeout seconds", "section": "proxy", "type": "float", "min": 1, "max": 1800, "default": "300", "restart": "proxy"},
+    "KEYHIVE_PROXY_MAX_RETRIES": {"label": "Max retries", "section": "proxy", "type": "int", "min": 0, "max": 20, "default": "2", "restart": "proxy"},
+    "KEYHIVE_PROXY_MAX_KEY_FAILOVERS": {"label": "Max key failovers", "section": "proxy", "type": "int", "min": 0, "max": 100, "default": "3", "restart": "proxy"},
+}
 
 
 def run_command(args: list[str], timeout: float = 8.0) -> dict[str, Any]:
@@ -201,6 +231,41 @@ def sanitize_log_lines(lines: list[str]) -> list[str]:
     return sanitized
 
 
+def log_source(kind: str) -> dict[str, Any]:
+    if kind == "scanner" and SCANNER_LOG_FILE.exists():
+        return {"kind": "file", "source": str(SCANNER_LOG_FILE), "args": ["tail", "-n", "0", "-F", str(SCANNER_LOG_FILE)]}
+    if kind == "scanner":
+        return {"kind": "journal", "source": "journalctl", "args": ["journalctl", "-u", SCANNER_SERVICE, "-b", "-n", "0", "-f", "-o", "cat"]}
+    return {"kind": "journal", "source": "journalctl", "args": ["journalctl", "-u", PROXY_SERVICE, "-b", "-n", "0", "-f", "-o", "cat"]}
+
+
+async def stream_logs(kind: str) -> AsyncIterator[str]:
+    source = log_source(kind)
+    proc = await asyncio.create_subprocess_exec(
+        *source["args"],
+        cwd=str(ROOT_DIR),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    yield f"event: meta\ndata: {json.dumps({'source': source['source'], 'kind': kind})}\n\n"
+    try:
+        assert proc.stdout is not None
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n")
+            payload = {"line": sanitize_log_lines([line])[0], "kind": kind, "ts": time.time()}
+            yield f"event: line\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    finally:
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                proc.kill()
+
+
 def scanner_logs(lines: int) -> dict[str, Any]:
     file_lines = read_log_file(SCANNER_LOG_FILE, lines)
     if file_lines:
@@ -212,7 +277,197 @@ def proxy_logs(lines: int) -> dict[str, Any]:
     return {"source": "journalctl", "lines": sanitize_log_lines(journal_logs(PROXY_SERVICE, lines))}
 
 
+def recent_failures() -> list[dict[str, Any]]:
+    stats = run_stats()
+    failures = stats.get("all_time", {}).get("failure_points", {})
+    updated = stats.get("last_updated")
+    last_reason = stats.get("last_failure_reason")
+    items = []
+    for key, count in failures.items():
+        if not count:
+            continue
+        label = key.replace("_", " ").replace("failures", "failure").title()
+        items.append(
+            {
+                "category": key,
+                "label": label,
+                "count": count,
+                "timestamp": updated,
+                "reason": last_reason if key in str(last_reason or "").lower().replace(" ", "_") else label,
+            }
+        )
+    return sorted(items, key=lambda item: int(item["count"]), reverse=True)[:6]
+
+
+def failure_context(category: str, lines: int = 240, radius: int = 4) -> dict[str, Any]:
+    if category not in FAILURE_KEYWORDS:
+        category = "unknown_failures"
+    keywords = FAILURE_KEYWORDS[category]
+    logs = scanner_logs(lines).get("lines", [])
+    matches = [
+        index
+        for index, line in enumerate(logs)
+        if any(keyword in line.lower() for keyword in keywords)
+    ]
+    if not matches:
+        return {
+            "category": category,
+            "timestamp": run_stats().get("last_updated"),
+            "reason": run_stats().get("last_failure_reason") or category.replace("_", " "),
+            "source": scanner_logs(1).get("source"),
+            "lines": [],
+        }
+    match = matches[-1]
+    start = max(0, match - radius)
+    end = min(len(logs), match + radius + 1)
+    return {
+        "category": category,
+        "timestamp": run_stats().get("last_updated"),
+        "reason": logs[match],
+        "source": scanner_logs(1).get("source"),
+        "lines": logs[start:end],
+    }
+
+
+def read_env_values() -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not ENV_FILE.exists():
+        return values
+    for line in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = ENV_LINE_RE.match(line)
+        if not match:
+            continue
+        key, value = match.groups()
+        values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def secret_status(env: dict[str, str]) -> dict[str, Any]:
+    gmail = env.get("GMAIL_ACCOUNTS", "")
+    gmail_count: int | str = 0
+    if gmail:
+        try:
+            parsed = json.loads(gmail)
+            gmail_count = len(parsed) if isinstance(parsed, list) else "configured"
+        except json.JSONDecodeError:
+            gmail_count = "configured"
+    return {
+        "agentmail_key": "configured" if env.get("AGENTMAIL_API_KEY") else "missing",
+        "nvidia_key": "configured" if env.get("NVDA_KEY") else "missing",
+        "gmail_accounts": gmail_count,
+        "web_password": "configured" if env.get("KEYHIVE_WEB_PASSWORD") or env.get("KEYHIVE_WEB_AUTH_TOKEN") else "missing",
+    }
+
+
+def validate_setting(key: str, value: Any) -> str:
+    schema = SETTING_SCHEMA[key]
+    kind = schema["type"]
+    if kind == "bool":
+        if value in {True, "true", "1", 1, "yes", "on"}:
+            return "1"
+        if value in {False, "false", "0", 0, "no", "off"}:
+            return "0"
+        raise ValueError(f"{key} must be boolean")
+    value_text = str(value).strip()
+    if not value_text:
+        raise ValueError(f"{key} cannot be empty")
+    if kind in {"int", "float"}:
+        number = int(value_text) if kind == "int" else float(value_text)
+        if "min" in schema and number < schema["min"]:
+            raise ValueError(f"{key} is below minimum")
+        if "max" in schema and number > schema["max"]:
+            raise ValueError(f"{key} is above maximum")
+        return str(number)
+    if kind == "select":
+        if value_text not in schema["options"]:
+            raise ValueError(f"{key} must be one of: {', '.join(schema['options'])}")
+        return value_text
+    if not re.fullmatch(r"[A-Za-z0-9_./:@+-]+", value_text):
+        raise ValueError(f"{key} contains unsupported characters")
+    return value_text
+
+
+def write_env_values(updates: dict[str, str]) -> None:
+    lines = ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines() if ENV_FILE.exists() else []
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        match = ENV_LINE_RE.match(line)
+        if not match or match.group(1) not in updates:
+            output.append(line)
+            continue
+        key = match.group(1)
+        output.append(f"{key}={updates[key]}")
+        seen.add(key)
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={value}")
+    tmp = ENV_FILE.with_suffix(".env.tmp")
+    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(ENV_FILE)
+
+
+def systemd_unit_path(service: str) -> Path | None:
+    status = systemd_service_status(service)
+    path = status.get("unit_path")
+    if path:
+        candidate = Path(str(path))
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def update_systemd_environment(path: Path, updates: dict[str, str]) -> None:
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("Environment=") or "=" not in stripped.removeprefix("Environment="):
+            output.append(line)
+            continue
+        key, _value = stripped.removeprefix("Environment=").split("=", 1)
+        if key in updates:
+            output.append(f"Environment={key}={updates[key]}")
+            seen.add(key)
+        else:
+            output.append(line)
+    insert_at = next((index + 1 for index, line in enumerate(output) if line.strip() == "[Service]"), len(output))
+    for key, value in updates.items():
+        if key not in seen:
+            output.insert(insert_at, f"Environment={key}={value}")
+            insert_at += 1
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("settings", payload)
+    if not isinstance(raw, dict):
+        raise ValueError("settings payload must be an object")
+    updates = {key: validate_setting(key, raw[key]) for key in raw if key in SETTING_SCHEMA}
+    if not updates:
+        return {"ok": True, "updated": [], "restart_required": []}
+    write_env_values(updates)
+    update_systemd_environment(PROXY_UNIT_FILE, updates)
+    live_unit = systemd_unit_path(PROXY_SERVICE)
+    if live_unit and live_unit != PROXY_UNIT_FILE:
+        update_systemd_environment(live_unit, updates)
+        run_command(["systemctl", "daemon-reload"], timeout=10.0)
+    return {"ok": True, "updated": sorted(updates), "restart_required": sorted({SETTING_SCHEMA[key]["restart"] for key in updates})}
+
+
 def settings() -> dict[str, Any]:
+    env = read_env_values()
+    status = systemd_service_status(PROXY_SERVICE)
+    values = {
+        key: os.getenv(key) or env.get(key) or schema["default"]
+        for key, schema in SETTING_SCHEMA.items()
+    }
     return {
         "project_path": str(ROOT_DIR),
         "frontend_host": WEB_HOST,
@@ -227,5 +482,9 @@ def settings() -> dict[str, Any]:
             "run_stats": str(RUN_STATS_FILE),
             "scanner_log": str(SCANNER_LOG_FILE),
         },
+        "editable": values,
+        "schema": SETTING_SCHEMA,
+        "proxy_unit": str(status.get("unit_path") or PROXY_UNIT_FILE),
+        "secrets": secret_status(env),
         "security_warning": "No auth is enabled. Do not expose this long-term without auth and firewall rules.",
     }

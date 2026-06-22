@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KeyHive Login</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/login.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-shell">
+      <section class="login-card">
+        <img class="login-brand" src="/assets/header.png" alt="KeyHive" />
+        <p class="eyebrow">Operator Access</p>
+        <h1>KeyHive Login</h1>
+        <form id="login-form" class="login-form">
+          <label for="secret">Password or token</label>
+          <input id="secret" name="secret" type="password" autocomplete="current-password" required />
+          <button class="button" type="submit">Sign in</button>
+          <p id="login-message" class="login-message"></p>
+        </form>
+        <p class="login-note">Auth is being prepared. The main dashboard is not protected yet.</p>
+      </section>
+    </main>
+    <script src="/static/login.js"></script>
+  </body>
+</html>

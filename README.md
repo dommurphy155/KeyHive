@@ -338,7 +338,7 @@ KeyHive Web UI is a small FastAPI app that serves a static black-background dash
 http://YOUR_SERVER_IP:8080
 ```
 
-The Web UI currently has no auth. That is temporary and unsafe for long-term public exposure. Put it behind auth and firewall rules before treating it as anything other than an operator-only control surface.
+The Web UI currently has a login-page foundation, but the dashboard and API routes are not protected yet. That is temporary and unsafe for long-term public exposure. Put it behind auth and firewall rules before treating it as anything other than an operator-only control surface.
 
 Install and run through systemd:
 
@@ -358,21 +358,24 @@ python3 -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
 
 Pages:
 
+- Login: initial password/token form for the upcoming auth phase.
 - Dashboard: scanner/proxy/key/cookie/provider/run overview.
 - Scanner: scanner service state and start/stop/restart controls.
 - Proxy: proxy health, provider/fallback stats, and start/stop/restart controls.
-- Logs: scanner and proxy logs with selectable line counts.
+- Logs: scanner and proxy logs with selectable line counts, SSE live streaming, pause/resume, copy, and jump-to-latest.
 - Stats: since-restart runs, all-time runs, failure points, key stats, and proxy stats.
-- Settings: paths, ports, service names, runtime files, and auth warning.
+- Settings: boxed runtime sections plus whitelisted editable proxy/model settings. Model/provider changes are written to the safe config sources and require a proxy restart.
 
 Useful API checks:
 
 ```bash
+curl http://127.0.0.1:8080/api/auth/config
 curl http://127.0.0.1:8080/api/status
 curl http://127.0.0.1:8080/api/scanner/status
 curl http://127.0.0.1:8080/api/proxy/status
 curl http://127.0.0.1:8080/api/proxy/stats
 curl http://127.0.0.1:8080/api/logs/scanner
+curl http://127.0.0.1:8080/api/settings
 ```
 
 Claude Code shell config is managed by the installer:

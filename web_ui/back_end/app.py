@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from web_ui.back_end.services import keyhive_service as keyhive
+from web_ui.back_end.services import auth_service
 
 FRONT_END_DIR = Path("/root/api_maker/web_ui/front_end")
 ASSETS_DIR = Path("/root/api_maker/assets")
@@ -35,6 +36,28 @@ async def index() -> FileResponse:
 @app.head("/")
 async def index_head() -> FileResponse:
     return FileResponse(FRONT_END_DIR / "index.html")
+
+
+@app.get("/login")
+async def login() -> FileResponse:
+    return FileResponse(FRONT_END_DIR / "login.html")
+
+
+@app.head("/login")
+async def login_head() -> FileResponse:
+    return FileResponse(FRONT_END_DIR / "login.html")
+
+
+@app.get("/api/auth/config")
+async def auth_config() -> dict[str, object]:
+    return auth_service.auth_config()
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: dict[str, str]) -> dict[str, object]:
+    if auth_service.verify_login(str(payload.get("secret", ""))):
+        return {"ok": True, "protects_ui": False}
+    raise HTTPException(status_code=401, detail="Invalid password or token")
 
 
 @app.get("/api/status")
@@ -112,9 +135,38 @@ async def logs_proxy(lines: int = Query(default=100, ge=1, le=500)) -> dict[str,
     return keyhive.proxy_logs(lines)
 
 
+@app.get("/api/logs/{kind}/stream")
+async def logs_stream(kind: str) -> StreamingResponse:
+    if kind not in {"scanner", "proxy"}:
+        raise HTTPException(status_code=404, detail="unsupported log stream")
+    return StreamingResponse(
+        keyhive.stream_logs(kind),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/failures/recent")
+async def failures_recent() -> list[dict[str, Any]]:
+    return keyhive.recent_failures()
+
+
+@app.get("/api/failures/{category}")
+async def failures_context(category: str) -> dict[str, Any]:
+    return keyhive.failure_context(category)
+
+
 @app.get("/api/settings")
 async def settings() -> dict[str, Any]:
     return keyhive.settings()
+
+
+@app.post("/api/settings")
+async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return keyhive.save_settings(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/scanner/{action}")

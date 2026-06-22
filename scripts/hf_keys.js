@@ -14,11 +14,18 @@ const COOKIE_PATH    = path.join(ROOT_DIR, "data", "hc_cookie.json");
 const KEYS_PATH      = path.join(ROOT_DIR, "data", "keys.txt");
 const REFRESH_SCRIPT = path.join(ROOT_DIR, "scripts", "hc_cookie_refresh.js");
 const BURNER_SCRIPT  = path.join(ROOT_DIR, "scripts", "burner_email.py");
+const HCAPTCHA_COOKIE_URLS = [
+  "https://hcaptcha.com",
+  "https://www.hcaptcha.com",
+  "https://accounts.hcaptcha.com",
+  "https://api.hcaptcha.com",
+];
 
 const CDP_PORT  = 9334;
 const CDP_HOST  = "127.0.0.1";
 const X_DISPLAY = ":1";
 const CHROME_LOG = "/root/chrome-9334.log";
+const CONFIRM_EMAIL_TIMEOUT = 20;
 
 // ─── Logging ───────────────────────────────────────────────────────────────
 const ts   = () => new Date().toISOString().slice(11, 19);
@@ -153,6 +160,59 @@ function burnInbox() {
   }
 }
 
+// ─── Cookie injection ─────────────────────────────────────────────────────
+function normalizeSameSite(value) {
+  return ["Strict", "Lax", "None"].includes(value) ? value : "Lax";
+}
+
+function cookieKey(cookie) {
+  return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}`;
+}
+
+function toPlaywrightCookie(cookie) {
+  const out = {
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path || "/",
+    httpOnly: Boolean(cookie.httpOnly),
+    secure: Boolean(cookie.secure),
+    sameSite: normalizeSameSite(cookie.sameSite),
+  };
+
+  if (cookie.expires && cookie.expires > 0) out.expires = cookie.expires;
+
+  if (cookie.partitionKey) {
+    if (typeof cookie.partitionKey === "string") {
+      out.partitionKey = cookie.partitionKey;
+    } else if (cookie.partitionKey.topLevelSite) {
+      out.partitionKey = cookie.partitionKey.topLevelSite;
+      if (typeof cookie.partitionKey.hasCrossSiteAncestor === "boolean") {
+        out._crHasCrossSiteAncestor = cookie.partitionKey.hasCrossSiteAncestor;
+      }
+    }
+  }
+
+  return out;
+}
+
+async function injectHcCookies(context, cookies) {
+  const normalized = cookies.map(toPlaywrightCookie);
+  await context.addCookies(normalized);
+
+  const expected = new Set(normalized.map(cookieKey));
+  const actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
+  const actual = new Set(actualCookies.map(cookieKey));
+  const missing = [...expected].filter((key) => !actual.has(key));
+
+  if (missing.length > 0) {
+    warn(`Missing hCaptcha cookie(s) after injection: ${missing.join(", ")}`);
+    throw new Error("hCaptcha cookie injection verification failed");
+  }
+
+  ok(`Cookie verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
+}
+
 // ─── Port + profile utils ──────────────────────────────────────────────────
 function killPort(port) {
   try { execSync(`fuser -k ${port}/tcp 2>/dev/null || true`); } catch {}
@@ -229,7 +289,7 @@ function killChrome(child) {
 }
 
 // ─── Main Flow ────────────────────────────────────────────────────────────
-async function main() {
+async function runOnce(attempt = 1, maxAttempts = 2) {
   const cookies  = await ensureCookies();
   const email    = getBurnerEmail();
   const password = generatePassword();
@@ -252,16 +312,7 @@ async function main() {
     const context = browser.contexts()[0] ?? (await browser.newContext());
 
     step("Injecting hc_cookies...");
-    await context.addCookies(cookies.map(c => ({
-      name:     c.name,
-      value:    c.value,
-      domain:   c.domain.startsWith(".") ? c.domain : `.${c.domain}`,
-      path:     c.path || "/",
-      ...(c.expires && c.expires > 0 ? { expires: c.expires } : {}),
-      httpOnly: c.httpOnly || false,
-      secure:   c.secure   || false,
-      sameSite: c.sameSite || "None",
-    })));
+    await injectHcCookies(context, cookies);
 
     page = context.pages()[0] ?? (await context.newPage());
 
@@ -282,8 +333,36 @@ async function main() {
     await page.waitForLoadState("networkidle");
     await humanDelay(1000, 2000);
 
+    let usernameInput = page.locator('input[name="username"]');
+    if (!(await usernameInput.isVisible({ timeout: 5000 }).catch(() => false))) {
+      const emailInput = page.locator('input[name="email"][type="email"]');
+      const passwordInput = page.locator('input[name="password"][type="password"]');
+
+      if (await emailInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+        warn("Username field did not appear; email field is still visible — retrying email/password step once.");
+        await emailInput.click();
+        await emailInput.fill("");
+        await humanDelay(300, 600);
+        await emailInput.type(email, { delay: 100 });
+        await humanDelay();
+
+        if (await passwordInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await passwordInput.click();
+          await passwordInput.fill("");
+          await humanDelay(300, 600);
+          await passwordInput.fill(password);
+          await humanDelay();
+        }
+
+        await page.locator('button[type="submit"]').filter({ hasText: "Next" }).click();
+        await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+        await humanDelay(1000, 2000);
+      }
+    }
+
     step("Filling username...");
-    await page.locator('input[name="username"]').fill(username);
+    usernameInput = page.locator('input[name="username"]');
+    await usernameInput.fill(username);
     await humanDelay();
 
     step("Filling full name...");
@@ -291,15 +370,7 @@ async function main() {
     await humanDelay();
 
     step("Verifying cookies in session...");
-    const sessionCookies = await context.cookies();
-    const hasHcCookie = cookies.some(hc =>
-      sessionCookies.some(sc => sc.name === hc.name)
-    );
-    if (!hasHcCookie) {
-      fail("hc_cookie not found in session!");
-      process.exit(1);
-    }
-    ok(`Cookie verified in session (${cookies.length} injected).`);
+    await injectHcCookies(context, cookies);
 
     step("Checking terms checkbox...");
     const checkbox = page.locator('input[type="checkbox"]').first();
@@ -320,10 +391,10 @@ async function main() {
     await humanDelay(2000, 3000);
 
     // ── 4. Confirm Email (with captcha fallback) ─────────────────────────────
-    step("Polling for confirmation email (60s)...");
+    step(`Polling for confirmation email (${CONFIRM_EMAIL_TIMEOUT}s)...`);
     let confirmLink = null;
     try {
-      confirmLink = execSync(`timeout 60 python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" }).trim();
+      confirmLink = execSync(`timeout ${CONFIRM_EMAIL_TIMEOUT} python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" }).trim();
       const match = confirmLink.match(/https:\/\/huggingface\.co\/[^\s"'<>]+/);
       confirmLink = match ? match[0] : (confirmLink.startsWith("http") ? confirmLink : null);
     } catch {
@@ -331,12 +402,18 @@ async function main() {
     }
 
     if (!confirmLink) {
-      warn("No confirmation email in 7s — likely hCaptcha. Refreshing cookies...");
+      warn(`No confirmation email in ${CONFIRM_EMAIL_TIMEOUT}s — likely hCaptcha.`);
       await browser.close();
       killChrome(chromeProcess);
       cleanupProfile(profileDir);
       burnInbox();
 
+      if (attempt >= maxAttempts) {
+        fail("No retry attempts left; not refreshing cookies again.");
+        return "FAILED";
+      }
+
+      warn("Refreshing cookies before retry...");
       step("Running hc_cookie_refresh.js...");
       try {
         execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
@@ -455,6 +532,22 @@ ok("Email confirmed.");
     killChrome(chromeProcess);
     cleanupProfile(profileDir);
   }
+}
+
+async function main() {
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) {
+      step(`Retrying Hugging Face flow (${attempt}/${maxAttempts})...`);
+    }
+
+    const result = await runOnce(attempt, maxAttempts);
+    if (result !== "RETRY") return;
+  }
+
+  fail("HF flow still blocked after cookie refresh retry.");
+  process.exit(1);
 }
 
 main();
