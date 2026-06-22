@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 
 
+# Hugging Face router client plus the fallback inference path used when the
+# router endpoint returns shape/availability errors instead of a normal result.
 ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 INFERENCE_URL = "https://api-inference.huggingface.co/models/{model}"
 
@@ -36,6 +38,8 @@ class HFClient:
         token: str,
         payload: dict[str, Any],
     ) -> HFResponse:
+        # Prefer the router endpoint, but fall back to the older inference API
+        # when the router returns 404/422-style shape errors.
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -86,6 +90,8 @@ class HFClient:
         token: str,
         payload: dict[str, Any],
     ) -> HFResponse:
+        # Convert chat messages into a plain prompt because the older inference
+        # API expects a single input string instead of a message array.
         model = str(payload.get("model") or "")
         messages = payload.get("messages") or []
         prompt = "\n".join(
@@ -153,6 +159,8 @@ class HFClient:
 
 
 def retry_after_seconds(headers: httpx.Headers | None, default: int = 60) -> int:
+    # Parse Retry-After defensively because upstream headers are not always
+    # beautifully behaved.
     if headers is None:
         return default
     raw = headers.get("retry-after")

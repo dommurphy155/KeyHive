@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 
+# This is the mutable key pool for the proxy. It owns the in-memory view of
+# `data/keys.txt`, tracks cooldown/disable state, and writes removals back to
+# disk atomically.
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -22,6 +25,8 @@ def fingerprint(token: str) -> str:
 
 @dataclass
 class KeyState:
+    # Each KeyState is one Hugging Face token plus the runtime bookkeeping the
+    # proxy needs to decide whether it is usable.
     token: str
     fingerprint: str
     total_requests: int = 0
@@ -32,6 +37,8 @@ class KeyState:
 
     @property
     def available(self) -> bool:
+        # A key is usable only if it is not disabled and its cooldown window has
+        # expired.
         return self.disabled_reason is None and time.time() >= self.cooldown_until
 
     @property
@@ -55,6 +62,8 @@ class KeyState:
 
 class KeyStore:
     def __init__(self, keys_file: str, reload_seconds: int) -> None:
+        # The key file is reloaded periodically so edits on disk show up without
+        # a restart.
         self.keys_file = Path(keys_file)
         self.reload_seconds = max(1, reload_seconds)
         self._keys: list[KeyState] = []
@@ -78,6 +87,8 @@ class KeyStore:
             return None
 
     async def load(self, force: bool = False) -> None:
+        # Refresh the in-memory key list from disk. The dedupe step keeps the
+        # file sane even if duplicate tokens were appended by accident.
         async with self._lock:
             self.keys_file.parent.mkdir(parents=True, exist_ok=True)
             if not self.keys_file.exists():
@@ -128,6 +139,7 @@ class KeyStore:
             await asyncio.sleep(self.reload_seconds)
 
     async def acquire(self) -> KeyState | None:
+        # Round-robin through usable keys instead of hammering the first one.
         async with self._lock:
             if not self._keys:
                 return None
@@ -148,6 +160,8 @@ class KeyStore:
             state.failed_requests += 1
 
     async def cooldown_key(self, state: KeyState, seconds: int) -> None:
+        # 429s do not burn a key permanently; they just put it on cooldown so it
+        # can be retried once the upstream rate limit window moves on.
         async with self._lock:
             state.failed_requests += 1
             state.cooldown_until = time.time() + max(1, seconds)
@@ -160,6 +174,8 @@ class KeyStore:
         await self.remove_key(state, reason=reason, exhausted=True)
 
     async def remove_key(self, state: KeyState, reason: str, exhausted: bool) -> None:
+        # Removing a key updates memory and the backing file together so a key
+        # exhausted during a request disappears from the next reload too.
         async with self._lock:
             state.failed_requests += 1
             state.disabled_reason = reason
@@ -184,6 +200,8 @@ class KeyStore:
                 return
 
     def _atomic_write_tokens(self, tokens: list[str]) -> None:
+        # Write through a temp file because `keys.txt` is the scanner's shared
+        # source of truth and partial writes would be a bad day.
         payload = "".join(f"{token}\n" for token in tokens)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{self.keys_file.name}.",
