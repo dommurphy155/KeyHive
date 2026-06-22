@@ -14,6 +14,9 @@ from proxy.hf_client import HFResponse
 from proxy.fallback.nvidia_client import NvidiaResponse
 
 
+# This is a small runtime sanity test for the proxy fallback path. It checks
+# that exhausted HF keys get removed and that 402 responses can still fall back
+# to NVIDIA when the provider is available.
 async def test_key_removal() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         keys_file = Path(tmp) / "keys.txt"
@@ -32,6 +35,8 @@ async def test_key_removal() -> None:
 
 
 async def test_402_uses_nvidia_fallback() -> None:
+    # Patch the live proxy module with fake clients so the fallback branch can
+    # be exercised without making network calls.
     import proxy.keyhive_proxy as proxy_app
 
     class FakeHFClient:
@@ -100,6 +105,8 @@ async def test_402_uses_nvidia_fallback() -> None:
 
 
 def test_hysteresis() -> None:
+    # Verify the fallback manager stays on HF until the enter threshold is hit,
+    # then stays on NVIDIA until the exit threshold restores HF.
     os.environ["KEYHIVE_FALLBACK_ENABLED"] = "1"
     os.environ["KEYHIVE_FALLBACK_PROVIDER"] = "nvidia"
     os.environ["KEYHIVE_FALLBACK_ENTER_AT"] = "0"
