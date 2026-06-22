@@ -156,8 +156,9 @@ Create `.env` in the project root. The installer does this interactively and saf
 | `KEYHIVE_FALLBACK_PROVIDER` | No | Proxy fallback | Defaults to `nvidia` |
 | `KEYHIVE_FALLBACK_ENTER_AT` | No | Proxy fallback | Defaults to `0` |
 | `KEYHIVE_FALLBACK_EXIT_AT` | No | Proxy fallback | Defaults to `10` |
-| `KEYHIVE_NVIDIA_BASE_URL` | No | Proxy fallback | Defaults to NVIDIA's OpenAI-compatible endpoint |
-| `KEYHIVE_PROXY_DEFAULT_MODEL` | No | Proxy | Defaults to `Qwen/Qwen2.5-0.5B-Instruct` |
+| `KEYHIVE_HF_BASE_URL` | No | Proxy | Defaults to `https://router.huggingface.co/v1` |
+| `KEYHIVE_NVIDIA_BASE_URL` | No | Proxy fallback | Defaults to `https://integrate.api.nvidia.com/v1/chat/completions` |
+| `KEYHIVE_PROXY_DEFAULT_MODEL` | No | Proxy | Defaults to `zai-org/GLM-5.2` |
 | `KEYHIVE_PROXY_NVIDIA_MODEL` | No | Proxy | Defaults to `moonshotai/kimi-k2.6` |
 | `DEBUG` | No | Node scripts | Any non-empty value enables extra logs |
 | `KEYHIVE_SERVICE` | No | `bin/keyhive` | Overrides `api-maker-scheduler.service` |
@@ -286,8 +287,9 @@ KEYHIVE_FALLBACK_ENABLED=1
 KEYHIVE_FALLBACK_PROVIDER=nvidia
 KEYHIVE_FALLBACK_ENTER_AT=0
 KEYHIVE_FALLBACK_EXIT_AT=10
-KEYHIVE_NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
-KEYHIVE_PROXY_DEFAULT_MODEL=Qwen/Qwen2.5-0.5B-Instruct
+KEYHIVE_HF_BASE_URL=https://router.huggingface.co/v1
+KEYHIVE_NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1/chat/completions
+KEYHIVE_PROXY_DEFAULT_MODEL=zai-org/GLM-5.2
 KEYHIVE_PROXY_NVIDIA_MODEL=moonshotai/kimi-k2.6
 ```
 

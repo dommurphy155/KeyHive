@@ -299,8 +299,9 @@ def configure_proxy_env_defaults() -> None:
         "KEYHIVE_FALLBACK_PROVIDER": "nvidia",
         "KEYHIVE_FALLBACK_ENTER_AT": "0",
         "KEYHIVE_FALLBACK_EXIT_AT": "10",
-        "KEYHIVE_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1",
-        "KEYHIVE_PROXY_DEFAULT_MODEL": "Qwen/Qwen2.5-0.5B-Instruct",
+        "KEYHIVE_HF_BASE_URL": "https://router.huggingface.co/v1",
+        "KEYHIVE_NVIDIA_BASE_URL": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "KEYHIVE_PROXY_DEFAULT_MODEL": "zai-org/GLM-5.2",
         "KEYHIVE_PROXY_NVIDIA_MODEL": "moonshotai/kimi-k2.6",
     }
     env = load_env()

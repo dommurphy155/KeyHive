@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 
-ROUTER_URL = "https://router.huggingface.co/v1/chat/completions"
+ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 INFERENCE_URL = "https://api-inference.huggingface.co/models/{model}"
 
 
@@ -22,9 +22,10 @@ class HFResponse:
 
 
 class HFClient:
-    def __init__(self, timeout: float, logger: logging.Logger) -> None:
+    def __init__(self, timeout: float, logger: logging.Logger, base_url: str = ROUTER_BASE_URL) -> None:
         self.timeout = timeout
         self.logger = logger
+        self.chat_url = f"{base_url.rstrip('/')}/chat/completions"
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
 
     async def close(self) -> None:
@@ -40,7 +41,7 @@ class HFClient:
             "Content-Type": "application/json",
         }
         try:
-            response = await self._client.post(ROUTER_URL, headers=headers, json=payload)
+            response = await self._client.post(self.chat_url, headers=headers, json=payload)
         except httpx.TimeoutException:
             raise
         except httpx.HTTPError as exc:
@@ -67,7 +68,7 @@ class HFClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
-        request = self._client.build_request("POST", ROUTER_URL, headers=headers, json=payload)
+        request = self._client.build_request("POST", self.chat_url, headers=headers, json=payload)
         response = await self._client.send(request, stream=True)
 
         async def iterator() -> AsyncIterator[bytes]:

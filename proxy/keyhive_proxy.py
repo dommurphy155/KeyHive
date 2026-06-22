@@ -36,9 +36,10 @@ PORT = int(os.getenv("KEYHIVE_PROXY_PORT", "8787"))
 KEYS_FILE = os.getenv("KEYHIVE_KEYS_FILE", "/root/api_maker/data/keys.txt")
 DEFAULT_PROVIDER = os.getenv("KEYHIVE_PROXY_DEFAULT_PROVIDER", "hf")
 FALLBACK_PROVIDER = os.getenv("KEYHIVE_PROXY_FALLBACK_PROVIDER", "nvidia")
-DEFAULT_MODEL = os.getenv("KEYHIVE_PROXY_DEFAULT_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+HF_BASE_URL = os.getenv("KEYHIVE_HF_BASE_URL", "https://router.huggingface.co/v1")
+DEFAULT_MODEL = os.getenv("KEYHIVE_PROXY_DEFAULT_MODEL", "zai-org/GLM-5.2")
 NVIDIA_MODEL = os.getenv("KEYHIVE_PROXY_NVIDIA_MODEL", "moonshotai/kimi-k2.6")
-NVIDIA_BASE_URL = os.getenv("KEYHIVE_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
+NVIDIA_BASE_URL = os.getenv("KEYHIVE_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
 NVDA_KEY = os.getenv("NVDA_KEY", "")
 RELOAD_SECONDS = int(os.getenv("KEYHIVE_PROXY_RELOAD_SECONDS", "10"))
 REQUEST_TIMEOUT = float(os.getenv("KEYHIVE_PROXY_REQUEST_TIMEOUT", "300"))
@@ -53,7 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger("keyhive-proxy")
 
 key_store = KeyStore(KEYS_FILE, RELOAD_SECONDS)
-hf_client = HFClient(REQUEST_TIMEOUT, logger)
+hf_client = HFClient(REQUEST_TIMEOUT, logger, HF_BASE_URL)
 nvidia_client = NvidiaClient(NVDA_KEY, NVIDIA_BASE_URL, REQUEST_TIMEOUT)
 fallback_manager = FallbackManager(logger)
 watch_task: asyncio.Task[None] | None = None
@@ -140,6 +141,15 @@ def upstream_error_text(response: Any) -> str:
     return response.text or "upstream error"
 
 
+def upstream_error_code(response: Any) -> str:
+    if not response.json_data:
+        return ""
+    error = response.json_data.get("error")
+    if isinstance(error, dict):
+        return str(error.get("code") or "")
+    return ""
+
+
 async def mark_status(state: KeyState, status: int, headers: httpx.Headers | None) -> None:
     if status in {401, 403}:
         await key_store.invalidate_key(state, f"upstream {status}")
@@ -185,6 +195,7 @@ async def stats() -> dict[str, Any]:
         "active_requests": active_requests,
         "default_provider": DEFAULT_PROVIDER,
         "fallback_provider": FALLBACK_PROVIDER,
+        "hf_base_url": HF_BASE_URL,
         "default_model": DEFAULT_MODEL,
         "keys_file": KEYS_FILE,
         "last_reload": key_store.last_reload,
@@ -258,12 +269,11 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
     if system:
         messages.insert(0, {"role": "system", "content": str(system)})
 
-    model = str(body.get("model") or DEFAULT_MODEL)
-    if model == "default":
-        model = DEFAULT_MODEL
+    requested_model = str(body.get("model") or "claude")
+    upstream_model = DEFAULT_MODEL
 
     payload = {
-        "model": model,
+        "model": upstream_model,
         "messages": messages,
         "max_tokens": body.get("max_tokens", 1024),
         "temperature": body.get("temperature", 0.7),
@@ -272,14 +282,14 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
 
     active_requests += 1
     try:
-        status, content = await complete_text(model, payload)
+        status, content = await complete_text(requested_model, payload)
     finally:
         active_requests -= 1
 
     if body.get("stream"):
         return StreamingResponse(
-            anthropic_sse(model, content if status == 200 else f"KeyHive proxy error ({status}): {content}"),
-            status_code=status,
+            anthropic_sse(requested_model, content if status == 200 else f"KeyHive proxy error ({status}): {content}"),
+            status_code=200 if status < 500 else status,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -289,7 +299,7 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
             {"type": "error", "error": {"type": "api_error", "message": content}},
             status_code=status,
         )
-    return JSONResponse(anthropic_response(model, content))
+    return JSONResponse(anthropic_response(requested_model, content))
 
 
 async def complete_text(model: str, payload: dict[str, Any]) -> tuple[int, str]:
@@ -341,6 +351,14 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
         await mark_status(state, response.status_code, response.headers)
         last_status = response.status_code
         last_message = upstream_error_text(response)
+
+        if (
+            response.status_code == 400
+            and upstream_error_code(response) in {"model_not_found", "model_not_supported"}
+            and nvidia_client.available
+        ):
+            logger.warning("HF model rejected by provider; using NVIDIA fallback for this request")
+            return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
         if response.status_code == 429:
             if rate_limit_failovers >= 1:

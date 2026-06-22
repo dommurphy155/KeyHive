@@ -18,7 +18,7 @@ class NvidiaResponse:
 class NvidiaClient:
     def __init__(self, api_key: str, base_url: str, timeout: float) -> None:
         self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
+        self.chat_url = self._chat_url(base_url)
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
 
     @property
@@ -30,7 +30,7 @@ class NvidiaClient:
 
     async def chat(self, payload: dict[str, Any]) -> NvidiaResponse:
         response = await self._client.post(
-            f"{self.base_url}/chat/completions",
+            self.chat_url,
             headers=self._headers(),
             json=payload,
         )
@@ -39,7 +39,7 @@ class NvidiaClient:
     async def stream_chat(self, payload: dict[str, Any]) -> tuple[int, httpx.Headers, AsyncIterator[bytes]]:
         request = self._client.build_request(
             "POST",
-            f"{self.base_url}/chat/completions",
+            self.chat_url,
             headers=self._headers(),
             json=payload,
         )
@@ -60,6 +60,13 @@ class NvidiaClient:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _chat_url(base_url: str) -> str:
+        url = base_url.rstrip("/")
+        if url.endswith("/chat/completions"):
+            return url
+        return f"{url}/chat/completions"
 
     @staticmethod
     def _response_from_httpx(response: httpx.Response) -> NvidiaResponse:
