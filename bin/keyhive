@@ -79,6 +79,7 @@ USAGE
   row "proxy test" "Send a tiny test request through the proxy"
 
   section "OTHER"
+  row "doctor" "Run local diagnostics"
   row "tree" "Show a clean project tree"
   row "help" "Show this help"
 
@@ -319,6 +320,223 @@ show_tree() {
   tree -a -I '.git|.venv|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|fail_*.png|chrome-*.log|*.log'
 }
 
+doctor_ok() {
+  printf "  %s✓%s %s\n" "$GREEN" "$RESET" "$1"
+}
+
+doctor_warn() {
+  printf "  %s!%s %s\n" "$YELLOW" "$RESET" "$1"
+}
+
+doctor_fail() {
+  printf "  %s✗%s %s\n" "$RED" "$RESET" "$1"
+}
+
+env_value() {
+  key="$1"
+  if [ ! -f "$ROOT_DIR/.env" ]; then
+    return
+  fi
+  "$PYTHON_BIN" - "$ROOT_DIR/.env" "$key" <<'PY'
+import sys
+from pathlib import Path
+
+env_file = Path(sys.argv[1])
+target = sys.argv[2]
+for line in env_file.read_text().splitlines():
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    if key == target:
+        print(value)
+        break
+PY
+}
+
+mask_secret() {
+  value="$1"
+  if [ -z "$value" ]; then
+    return
+  fi
+  "$PYTHON_BIN" - "$value" <<'PY'
+import sys
+value = sys.argv[1]
+if len(value) <= 10:
+    print(value[:2] + "..." + value[-2:])
+else:
+    print(value[:6] + "..." + value[-4:])
+PY
+}
+
+json_field() {
+  field="$1"
+  "$PYTHON_BIN" - "$field" <<'PY'
+import json
+import sys
+
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+value = data
+for part in field.split("."):
+    if isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is not None:
+    print(value)
+PY
+}
+
+doctor_check_imports() {
+  "$PYTHON_BIN" - <<'PY'
+mods = ["fastapi", "uvicorn", "httpx", "rich", "dotenv"]
+missing = []
+for mod in mods:
+    try:
+        __import__(mod)
+    except Exception:
+        missing.append(mod)
+if missing:
+    print(", ".join(missing))
+    raise SystemExit(1)
+PY
+}
+
+doctor_check_node_module() {
+  module="$1"
+  node -e "require.resolve('$module')" >/dev/null 2>&1
+}
+
+run_doctor() {
+  section "KEYHIVE DOCTOR"
+
+  warnings=0
+  failures=0
+
+  if [ -d "$ROOT_DIR" ]; then doctor_ok "Project root: $ROOT_DIR"; else doctor_fail "Project root missing: $ROOT_DIR"; failures=$((failures + 1)); fi
+  if [ -f "$ROOT_DIR/.env" ]; then doctor_ok ".env exists"; else doctor_fail ".env missing"; failures=$((failures + 1)); fi
+  if [ -d "$ROOT_DIR/.venv" ]; then doctor_ok "Python venv exists"; else doctor_warn "Python venv missing"; warnings=$((warnings + 1)); fi
+
+  if doctor_check_imports >/tmp/keyhive_doctor_imports 2>/dev/null; then
+    doctor_ok "Python deps import: fastapi, uvicorn, httpx, rich, dotenv"
+  else
+    missing_imports="$(cat /tmp/keyhive_doctor_imports 2>/dev/null || true)"
+    doctor_warn "Python deps missing: ${missing_imports:-unknown}"
+    warnings=$((warnings + 1))
+  fi
+
+  if [ -n "$NODE_BIN" ]; then
+    doctor_ok "Node available: $NODE_BIN"
+    if doctor_check_node_module dotenv; then doctor_ok "Node dep: dotenv"; else doctor_warn "Node dep missing: dotenv"; warnings=$((warnings + 1)); fi
+    if doctor_check_node_module playwright; then doctor_ok "Node dep: playwright"; else doctor_warn "Node dep missing: playwright"; warnings=$((warnings + 1)); fi
+  else
+    doctor_warn "Node not found"
+    warnings=$((warnings + 1))
+  fi
+
+  chrome_bin="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+  if [ -n "$chrome_bin" ]; then doctor_ok "Chrome/Chromium: $chrome_bin"; else doctor_warn "Chrome/Chromium not found"; warnings=$((warnings + 1)); fi
+
+  if [ -f "$KEYS_FILE" ]; then
+    key_count="$(grep -cve '^\s*$' "$KEYS_FILE" || true)"
+    doctor_ok "HF keys file: $KEYS_FILE"
+    doctor_ok "HF keys: $key_count"
+  else
+    doctor_fail "HF keys file missing: $KEYS_FILE"
+    failures=$((failures + 1))
+  fi
+
+  if [ -f "$COOKIE_FILE" ]; then doctor_ok "hCaptcha cookie file exists"; else doctor_warn "hCaptcha cookie file missing"; warnings=$((warnings + 1)); fi
+
+  agentmail="$(env_value AGENTMAIL_API_KEY || true)"
+  if [ -n "$agentmail" ]; then doctor_ok "AgentMail key configured: $(mask_secret "$agentmail")"; else doctor_warn "AgentMail key missing"; warnings=$((warnings + 1)); fi
+
+  nvidia="$(env_value NVDA_KEY || true)"
+  if [ -n "$nvidia" ]; then doctor_ok "NVIDIA key configured: $(mask_secret "$nvidia")"; else doctor_warn "NVIDIA key missing"; warnings=$((warnings + 1)); fi
+
+  gmail_raw="$(env_value GMAIL_ACCOUNTS || true)"
+  if [ -n "$gmail_raw" ]; then
+    gmail_count="$(printf "%s" "$gmail_raw" | "$PYTHON_BIN" -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo "invalid")"
+    if [ "$gmail_count" = "invalid" ]; then
+      doctor_warn "Gmail accounts JSON invalid"
+      warnings=$((warnings + 1))
+    else
+      doctor_ok "Gmail accounts: $gmail_count"
+    fi
+  else
+    doctor_warn "Gmail accounts missing"
+    warnings=$((warnings + 1))
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    doctor_ok "systemd available"
+    if service_exists; then doctor_ok "Scanner unit installed: $SERVICE"; else doctor_warn "Scanner unit missing: $SERVICE"; warnings=$((warnings + 1)); fi
+    if proxy_service_exists; then doctor_ok "Proxy unit installed: $PROXY_SERVICE"; else doctor_warn "Proxy unit missing: $PROXY_SERVICE"; warnings=$((warnings + 1)); fi
+    scanner_active="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    proxy_active="$(systemctl is-active "$PROXY_SERVICE" 2>/dev/null || true)"
+    if [ "$scanner_active" = "active" ]; then
+      doctor_ok "Scanner service: active"
+    else
+      doctor_warn "Scanner service: ${scanner_active:-unknown}"
+      warnings=$((warnings + 1))
+    fi
+    if [ "$proxy_active" = "active" ]; then
+      doctor_ok "Proxy service: active"
+    else
+      doctor_warn "Proxy service: ${proxy_active:-unknown}"
+      warnings=$((warnings + 1))
+    fi
+  else
+    doctor_warn "systemd not available"
+    warnings=$((warnings + 1))
+  fi
+
+  health="$(curl -fsS "$PROXY_URL/health" 2>/dev/null || true)"
+  if [ -n "$health" ]; then
+    doctor_ok "Proxy health: $(printf "%s" "$health" | json_field status 2>/dev/null || echo "ok")"
+    provider="$(printf "%s" "$health" | json_field current_provider 2>/dev/null || true)"
+    [ -n "$provider" ] && doctor_ok "Current provider: $provider"
+  else
+    doctor_warn "Proxy health unreachable: $PROXY_URL/health"
+    warnings=$((warnings + 1))
+  fi
+
+  stats_json="$(curl -fsS "$PROXY_URL/stats" 2>/dev/null || true)"
+  if [ -n "$stats_json" ]; then
+    available="$(printf "%s" "$stats_json" | json_field keys_available 2>/dev/null || true)"
+    fallback="$(printf "%s" "$stats_json" | json_field fallback_enabled 2>/dev/null || true)"
+    nvidia_available="$(printf "%s" "$stats_json" | json_field nvidia_available 2>/dev/null || true)"
+    [ -n "$available" ] && doctor_ok "Proxy HF usable keys: $available"
+    [ -n "$fallback" ] && doctor_ok "Fallback enabled: $fallback"
+    [ -n "$nvidia_available" ] && doctor_ok "NVIDIA fallback available: $nvidia_available"
+  else
+    doctor_warn "Proxy stats unreachable: $PROXY_URL/stats"
+    warnings=$((warnings + 1))
+  fi
+
+  proxy_host="$(env_value KEYHIVE_PROXY_HOST || true)"
+  if [ -n "$proxy_host" ] && [ "$proxy_host" != "127.0.0.1" ]; then
+    doctor_warn "Proxy host is not loopback: $proxy_host"
+    warnings=$((warnings + 1))
+  fi
+
+  if [ "${ANTHROPIC_BASE_URL:-}" = "http://127.0.0.1:8787" ]; then
+    doctor_ok "Claude env active: ANTHROPIC_BASE_URL"
+  else
+    doctor_warn "Claude env not sourced in current shell"
+    warnings=$((warnings + 1))
+  fi
+
+  section "SUMMARY"
+  printf "  Warnings: %s\n" "$warnings"
+  printf "  Failures: %s\n" "$failures"
+}
+
 proxy_start() {
   if ! proxy_service_exists; then
     echo "✗ Systemd service not found: $PROXY_SERVICE"
@@ -533,6 +751,10 @@ case "$cmd" in
 
   tree)
     show_tree
+    ;;
+
+  doctor)
+    run_doctor
     ;;
 
   proxy)

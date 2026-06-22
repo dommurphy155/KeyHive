@@ -196,7 +196,9 @@ keyhive help
 | `keyhive proxy restart` | Restart the local proxy. |
 | `keyhive proxy status` | Show systemd status and `/health`. |
 | `keyhive proxy stats` | Show `/stats`. |
+| `keyhive proxy fallback` | Show fallback provider status. |
 | `keyhive proxy test` | Send a tiny local chat completion request. |
+| `keyhive doctor` | Run diagnostics for env, deps, services, proxy, and Claude config. |
 | `keyhive tree` | Show a clean project tree without install/runtime noise. |
 
 Direct script commands:
@@ -214,6 +216,12 @@ Clean project structure:
 
 ```bash
 keyhive tree
+```
+
+Diagnostics:
+
+```bash
+keyhive doctor
 ```
 
 ## KeyHive Proxy
