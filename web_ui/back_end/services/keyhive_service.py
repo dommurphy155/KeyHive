@@ -12,6 +12,9 @@ from typing import Any
 
 import httpx
 
+# This module is the backend read/write facade for the Web UI. It wraps the
+# scanner, proxy, logs, runtime files, and editable proxy settings into a single
+# API-friendly surface.
 ROOT_DIR = Path("/root/api_maker")
 DATA_DIR = ROOT_DIR / "data"
 LOG_DIR = ROOT_DIR / "logs"
@@ -44,6 +47,8 @@ FAILURE_KEYWORDS = {
     "unknown_failures": ["error", "failed", "exception"],
 }
 
+# Only these proxy/runtime values are editable from the Web UI. Secrets stay in
+# .env and are reported as configured/missing rather than exposed directly.
 SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "KEYHIVE_PROXY_HOST": {"label": "Proxy host", "section": "proxy", "type": "text", "default": "127.0.0.1", "restart": "proxy"},
     "KEYHIVE_PROXY_PORT": {"label": "Proxy port", "section": "proxy", "type": "int", "min": 1, "max": 65535, "default": "8787", "restart": "proxy"},
@@ -62,6 +67,8 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
 
 
 def run_command(args: list[str], timeout: float = 8.0) -> dict[str, Any]:
+    # Wrap subprocess calls so the web layer can report failures without raising
+    # raw exceptions back through FastAPI.
     try:
         proc = subprocess.run(
             args,
@@ -83,6 +90,8 @@ def run_command(args: list[str], timeout: float = 8.0) -> dict[str, Any]:
 
 
 def systemd_service_status(service: str) -> dict[str, Any]:
+    # Query the live systemd state so the dashboard can show whether the scanner
+    # and proxy are actually running, not just whether their unit files exist.
     active = run_command(["systemctl", "is-active", service])
     enabled = run_command(["systemctl", "is-enabled", service])
     show = run_command(
@@ -113,6 +122,8 @@ def systemd_service_status(service: str) -> dict[str, Any]:
 
 
 def control_service(service: str, action: str) -> dict[str, Any]:
+    # Starting or restarting the scanner also resets run stats so the dashboard
+    # buckets line up with the service lifecycle.
     if action not in SERVICE_ACTIONS:
         return {"ok": False, "error": f"unsupported action: {action}"}
     if service == SCANNER_SERVICE and action == "start":
@@ -130,6 +141,8 @@ def file_mtime(path: Path) -> str | None:
 
 
 def cookie_info() -> dict[str, Any]:
+    # Expose the cookie file age rather than the cookie contents. The contents
+    # are sensitive and intentionally never returned here.
     if not COOKIE_FILE.exists():
         return {"file": str(COOKIE_FILE), "exists": False, "modified": None, "age_seconds": None}
 
@@ -144,6 +157,8 @@ def cookie_info() -> dict[str, Any]:
 
 
 def key_stats() -> dict[str, Any]:
+    # The key file is the scanner's output queue. The web UI only needs counts
+    # and modified time, not the raw token values.
     if not KEYS_FILE.exists():
         return {"file": str(KEYS_FILE), "exists": False, "count": 0, "modified": None}
 
@@ -158,6 +173,8 @@ def key_stats() -> dict[str, Any]:
 
 
 def run_stats() -> dict[str, Any]:
+    # Return a safe fallback when the stats file is missing or unreadable so the
+    # dashboard can stay up even if the scanner hasn't written anything yet.
     empty_failures = {
         "cookie_failures": 0,
         "selector_failures": 0,
@@ -197,6 +214,8 @@ def run_stats() -> dict[str, Any]:
 
 
 async def proxy_json(path: str) -> dict[str, Any]:
+    # The web UI uses the local proxy itself as a status source rather than
+    # duplicating provider-routing logic in the frontend.
     url = f"{PROXY_URL.rstrip('/')}/{path.lstrip('/')}"
     try:
         async with httpx.AsyncClient(timeout=4.0) as client:
@@ -209,6 +228,8 @@ async def proxy_json(path: str) -> dict[str, Any]:
 
 
 def read_log_file(path: Path, lines: int) -> list[str]:
+    # Prefer the flat scanner log file when it exists because it is faster than
+    # shelling out to journalctl for every dashboard refresh.
     if not path.exists():
         return []
     safe_lines = max(1, min(lines, MAX_LOG_LINES))
@@ -217,12 +238,15 @@ def read_log_file(path: Path, lines: int) -> list[str]:
 
 
 def journal_logs(service: str, lines: int) -> list[str]:
+    # Fallback to journalctl when the flat log file is absent.
     safe_lines = str(max(1, min(lines, MAX_LOG_LINES)))
     result = run_command(["journalctl", "-u", service, "-b", "-n", safe_lines, "-o", "cat", "--no-pager"], timeout=8.0)
     return result["stdout"].splitlines()
 
 
 def sanitize_log_lines(lines: list[str]) -> list[str]:
+    # Mask email addresses and Hugging Face tokens before logs are shipped to the
+    # browser. This is the last safety net before the UI renders text.
     sanitized = []
     for line in lines:
         line = EMAIL_RE.sub(r"\1***\2", line)
@@ -232,6 +256,7 @@ def sanitize_log_lines(lines: list[str]) -> list[str]:
 
 
 def log_source(kind: str) -> dict[str, Any]:
+    # Scanner logs prefer the repo-local file; proxy logs come from systemd.
     if kind == "scanner" and SCANNER_LOG_FILE.exists():
         return {"kind": "file", "source": str(SCANNER_LOG_FILE), "args": ["tail", "-n", "0", "-F", str(SCANNER_LOG_FILE)]}
     if kind == "scanner":
@@ -240,6 +265,8 @@ def log_source(kind: str) -> dict[str, Any]:
 
 
 async def stream_logs(kind: str) -> AsyncIterator[str]:
+    # SSE log streaming lets the frontend tail logs without polling or keeping a
+    # second code path just for "live" mode.
     source = log_source(kind)
     proc = await asyncio.create_subprocess_exec(
         *source["args"],
@@ -278,6 +305,7 @@ def proxy_logs(lines: int) -> dict[str, Any]:
 
 
 def recent_failures() -> list[dict[str, Any]]:
+    # Convert the raw failure counters into a compact list for the dashboard.
     stats = run_stats()
     failures = stats.get("all_time", {}).get("failure_points", {})
     updated = stats.get("last_updated")
@@ -300,6 +328,8 @@ def recent_failures() -> list[dict[str, Any]]:
 
 
 def failure_context(category: str, lines: int = 240, radius: int = 4) -> dict[str, Any]:
+    # Pull a small window of nearby scanner log lines around the most recent
+    # match so the operator gets context instead of a single cryptic line.
     if category not in FAILURE_KEYWORDS:
         category = "unknown_failures"
     keywords = FAILURE_KEYWORDS[category]
@@ -330,6 +360,8 @@ def failure_context(category: str, lines: int = 240, radius: int = 4) -> dict[st
 
 
 def read_env_values() -> dict[str, str]:
+    # Parse .env without sourcing shell code. Only simple KEY=VALUE lines matter
+    # for the editable settings view.
     values: dict[str, str] = {}
     if not ENV_FILE.exists():
         return values
@@ -343,6 +375,7 @@ def read_env_values() -> dict[str, str]:
 
 
 def secret_status(env: dict[str, str]) -> dict[str, Any]:
+    # Report whether secrets are configured without leaking their values.
     gmail = env.get("GMAIL_ACCOUNTS", "")
     gmail_count: int | str = 0
     if gmail:
@@ -360,6 +393,7 @@ def secret_status(env: dict[str, str]) -> dict[str, Any]:
 
 
 def validate_setting(key: str, value: Any) -> str:
+    # Enforce type and bounds before writing back into .env or systemd units.
     schema = SETTING_SCHEMA[key]
     kind = schema["type"]
     if kind == "bool":
@@ -388,6 +422,8 @@ def validate_setting(key: str, value: Any) -> str:
 
 
 def write_env_values(updates: dict[str, str]) -> None:
+    # Rewrite only the keys the Web UI owns, preserving unrelated environment
+    # values and comments already present in .env.
     lines = ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines() if ENV_FILE.exists() else []
     seen: set[str] = set()
     output: list[str] = []
@@ -409,6 +445,7 @@ def write_env_values(updates: dict[str, str]) -> None:
 
 
 def systemd_unit_path(service: str) -> Path | None:
+    # If systemd reports a live unit file path, prefer that over the repo copy.
     status = systemd_service_status(service)
     path = status.get("unit_path")
     if path:
@@ -419,6 +456,8 @@ def systemd_unit_path(service: str) -> Path | None:
 
 
 def update_systemd_environment(path: Path, updates: dict[str, str]) -> None:
+    # Keep the service files in sync with editable settings so a daemon-reload
+    # is enough to pick up the new proxy values.
     if not path.exists():
         return
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -446,6 +485,8 @@ def update_systemd_environment(path: Path, updates: dict[str, str]) -> None:
 
 
 def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    # The Web UI only writes whitelisted settings, then tells the operator which
+    # services need a restart for the change to take effect.
     raw = payload.get("settings", payload)
     if not isinstance(raw, dict):
         raise ValueError("settings payload must be an object")
@@ -462,6 +503,8 @@ def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def settings() -> dict[str, Any]:
+    # Assemble the dashboard's settings payload from .env, systemd, and static
+    # defaults so the frontend gets a single coherent view.
     env = read_env_values()
     status = systemd_service_status(PROXY_SERVICE)
     values = {

@@ -10,6 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from web_ui.back_end.services import keyhive_service as keyhive
 from web_ui.back_end.services import auth_service
 
+# This FastAPI app is the Web UI surface. It serves static files and forwards
+# status/control calls to the existing scanner and proxy services.
 FRONT_END_DIR = Path("/root/api_maker/web_ui/front_end")
 ASSETS_DIR = Path("/root/api_maker/assets")
 
@@ -25,6 +27,7 @@ app = FastAPI(
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
+# The frontend is static, so FastAPI just serves the files and exposes the API.
 app.mount("/static", StaticFiles(directory=str(FRONT_END_DIR)), name="static")
 
 
@@ -55,6 +58,8 @@ async def auth_config() -> dict[str, object]:
 
 @app.post("/api/auth/login")
 async def auth_login(payload: dict[str, str]) -> dict[str, object]:
+    # This validates the configured secret, but it does not yet create a real
+    # authenticated session. The frontend is blunt about that limitation.
     if auth_service.verify_login(str(payload.get("secret", ""))):
         return {"ok": True, "protects_ui": False}
     raise HTTPException(status_code=401, detail="Invalid password or token")
@@ -62,6 +67,8 @@ async def auth_login(payload: dict[str, str]) -> dict[str, object]:
 
 @app.get("/api/status")
 async def status() -> dict[str, Any]:
+    # Aggregate the scanner, proxy, key, cookie, and run state into one payload
+    # so the dashboard can paint everything with a single request.
     proxy_health = await keyhive.proxy_json("/health")
     proxy_stats = await keyhive.proxy_json("/stats")
     return {
@@ -137,6 +144,8 @@ async def logs_proxy(lines: int = Query(default=100, ge=1, le=500)) -> dict[str,
 
 @app.get("/api/logs/{kind}/stream")
 async def logs_stream(kind: str) -> StreamingResponse:
+    # Only scanner and proxy logs are exposed as SSE streams. Other kinds would
+    # need dedicated implementation, not a free-for-all parameter.
     if kind not in {"scanner", "proxy"}:
         raise HTTPException(status_code=404, detail="unsupported log stream")
     return StreamingResponse(
@@ -163,6 +172,8 @@ async def settings() -> dict[str, Any]:
 
 @app.post("/api/settings")
 async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    # Validation errors are surfaced as 400s so the frontend can render a sane
+    # message instead of a stack trace.
     try:
         return keyhive.save_settings(payload)
     except ValueError as exc:
@@ -171,6 +182,8 @@ async def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/scanner/{action}")
 async def scanner_control(action: str) -> dict[str, Any]:
+    # The UI only allows the explicit start/stop/restart actions that the shared
+    # service helper knows how to run safely.
     if action not in keyhive.SERVICE_ACTIONS:
         raise HTTPException(status_code=404, detail="unsupported scanner action")
     return keyhive.control_service(keyhive.SCANNER_SERVICE, action)

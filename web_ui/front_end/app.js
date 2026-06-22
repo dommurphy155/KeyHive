@@ -1,3 +1,6 @@
+// The frontend is a static dashboard wired to the FastAPI backend. It does not
+// manage auth or business logic itself; it just renders the current runtime
+// state and log feeds.
 const state = {
   status: null,
   page: "dashboard",
@@ -21,6 +24,8 @@ const pageCopy = {
 const $ = (id) => document.getElementById(id);
 
 function escapeHtml(value) {
+  // Render log and status text safely because the UI shows raw output from
+  // scanner/proxy processes.
   return String(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -70,6 +75,8 @@ function statusClass(value) {
 }
 
 function renderDetails(id, rows) {
+  // Normalize empty values away so the UI does not look like a graveyard of
+  // meaningless labels.
   const el = $(id);
   if (!el) return;
   const visibleRows = rows.filter((row) => row[1] !== undefined);
@@ -83,6 +90,8 @@ function renderDetails(id, rows) {
 }
 
 function failureEntries(failures = {}) {
+  // The backend exposes failure buckets by category, and the dashboard renders
+  // the same small set of categories everywhere.
   return [
     ["Cookie", failures.cookie_failures ?? 0],
     ["Selector", failures.selector_failures ?? 0],
@@ -123,6 +132,7 @@ function renderCompactStats(id, bucket = {}) {
 }
 
 async function api(path, options = {}) {
+  // Keep all fetches same-origin and JSON-only so the backend stays simple.
   const response = await fetch(path, {
     headers: { "Accept": "application/json" },
     ...options,
@@ -140,6 +150,8 @@ function showError(error) {
 }
 
 async function loadStatus() {
+  // One request fills the entire dashboard; the rest of the UI is derived from
+  // the returned state object.
   showError(null);
   $("refresh-button").disabled = true;
   try {
@@ -155,6 +167,7 @@ async function loadStatus() {
 }
 
 function renderStatus() {
+  // Map backend fields into the dashboard tiles and detail panes.
   const data = state.status || {};
   const scanner = data.scanner || {};
   const proxy = data.proxy || {};
@@ -236,6 +249,7 @@ function renderStatus() {
 }
 
 function renderFailureCounts(id, failures) {
+  // Failure buckets are only interesting when at least one of them is non-zero.
   const el = $(id);
   if (!el) return;
   const rows = failureEntries(failures);
@@ -249,6 +263,8 @@ function renderFailureCounts(id, failures) {
 }
 
 async function loadRecentFailures() {
+  // Recent failures are fetched separately so the dashboard can show the latest
+  // context without reloading the whole page.
   const el = $("recent-failures");
   if (!el) return;
   try {

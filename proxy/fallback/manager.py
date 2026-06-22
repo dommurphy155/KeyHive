@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Decides when the proxy should use Hugging Face versus the NVIDIA fallback.
+# The thresholds are intentionally hysteresis-based so the provider does not
+# flap back and forth every time the key count changes by one.
 @dataclass
 class FallbackConfig:
     enabled: bool
@@ -29,6 +32,8 @@ class FallbackManager:
         self._nvidia_missing_logged = False
 
     def evaluate(self, hf_usable_keys: int, nvidia_available: bool) -> str:
+        # The provider only switches to NVIDIA when fallback is enabled, the
+        # configured provider is actually NVIDIA, and the fallback key exists.
         if not self.config.enabled:
             self._set_provider("hf", "fallback disabled", hf_usable_keys)
             return self._provider
@@ -70,6 +75,8 @@ class FallbackManager:
         return self._provider == "nvidia"
 
     def get_status(self, hf_usable_keys: int, nvidia_available: bool, nvidia_model: str) -> dict[str, Any]:
+        # This payload is what the dashboard and CLI use to explain the current
+        # routing decision without re-implementing the fallback logic.
         return {
             "fallback_enabled": self.config.enabled,
             "current_provider": self._provider,

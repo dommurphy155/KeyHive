@@ -31,6 +31,8 @@ from proxy.openai_compat import (
 
 load_dotenv("/root/api_maker/.env")
 
+# The proxy exposes an OpenAI-compatible chat API backed by Hugging Face keys
+# with NVIDIA fallback when the HF key pool gets thin or exhausted.
 HOST = os.getenv("KEYHIVE_PROXY_HOST", "127.0.0.1")
 PORT = int(os.getenv("KEYHIVE_PROXY_PORT", "8787"))
 KEYS_FILE = os.getenv("KEYHIVE_KEYS_FILE", "/root/api_maker/data/keys.txt")
@@ -65,6 +67,8 @@ active_requests = 0
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Startup loads the current key file once, then background tasks keep the
+    # key pool and fallback-provider state fresh while the process runs.
     global watch_task, fallback_watch_task
     await key_store.load(force=True)
     refresh_provider_mode()
@@ -100,10 +104,14 @@ def hf_usable_keys() -> int:
 
 
 def refresh_provider_mode() -> str:
+    # The fallback manager decides whether the current request should use HF or
+    # NVIDIA based on the number of usable HF keys and NVIDIA availability.
     return fallback_manager.evaluate(hf_usable_keys(), nvidia_client.available)
 
 
 async def watch_provider_mode() -> None:
+    # Watch the key file in the background so provider switching reacts to new
+    # key exhaustion or replenishment without a restart.
     while True:
         try:
             await key_store.reload_if_changed()
@@ -114,6 +122,7 @@ async def watch_provider_mode() -> None:
 
 
 async def parse_request_body(request: Request) -> dict[str, Any] | JSONResponse:
+    # Reject oversized or malformed JSON before the proxy spends a key on it.
     size = request.headers.get("content-length")
     if size:
         try:
@@ -152,6 +161,8 @@ def upstream_error_code(response: Any) -> str:
 
 
 async def mark_status(state: KeyState, status: int, headers: httpx.Headers | None) -> None:
+    # Upstream auth and rate-limit failures mutate the key pool because the
+    # failing key is no longer safe to keep using.
     if status in {401, 403}:
         await key_store.invalidate_key(state, f"upstream {status}")
         logger.warning("disabled invalid key %s after upstream %s", state.fingerprint, status)
@@ -164,6 +175,8 @@ async def mark_status(state: KeyState, status: int, headers: httpx.Headers | Non
 
 
 async def choose_key_or_503() -> KeyState | JSONResponse:
+    # Every request gets the freshest possible view of the key file before a
+    # token is handed out.
     await key_store.reload_if_changed()
     state = await key_store.acquire()
     if state is None:
@@ -222,6 +235,8 @@ async def models() -> dict[str, Any]:
 
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
+    # This is the OpenAI-compatible entrypoint. It normalizes the request body
+    # once, then dispatches to the streamed or non-streamed handler.
     global active_requests
     body = await parse_request_body(request)
     if isinstance(body, JSONResponse):
@@ -257,6 +272,8 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
 
 @app.post("/v1/messages", response_model=None)
 async def anthropic_messages(request: Request) -> JSONResponse | StreamingResponse:
+    # The Anthropic-compatible route reuses the same underlying provider logic
+    # but reshapes both the request and response bodies.
     global active_requests
     body = await parse_request_body(request)
     if isinstance(body, JSONResponse):
@@ -305,6 +322,8 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
 
 
 async def complete_text(model: str, payload: dict[str, Any]) -> tuple[int, str]:
+    # Used by the Anthropic route so the proxy can reuse the same request path
+    # without duplicating the upstream handling logic.
     response = await handle_non_stream(model, payload)
     data = json.loads(response.body.decode("utf-8"))
     if response.status_code != 200:
@@ -318,6 +337,8 @@ async def complete_text(model: str, payload: dict[str, Any]) -> tuple[int, str]:
 
 
 async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse:
+    # Non-streaming requests try Hugging Face first unless fallback mode is
+    # already active, then they fall through to NVIDIA when needed.
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
@@ -415,6 +436,8 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
 
 
 async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingResponse | JSONResponse:
+    # Streaming follows the same provider and failover rules as non-streaming,
+    # but preserves SSE framing all the way back to the client.
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
@@ -495,6 +518,7 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
 
 
 def no_provider_error() -> JSONResponse:
+    # This error means the proxy has no usable HF keys and no NVIDIA fallback.
     return JSONResponse(
         {
             "error": {
@@ -508,6 +532,8 @@ def no_provider_error() -> JSONResponse:
 
 
 async def handle_nvidia_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse:
+    # NVIDIA is a fallback, not a second primary. If it is unavailable, the
+    # proxy returns a clear upstream error instead of silently pretending.
     if not nvidia_client.available:
         return json_error("NVIDIA fallback is not configured", "no_fallback_key", 503)
     try:
@@ -523,6 +549,7 @@ async def handle_nvidia_non_stream(model: str, payload: dict[str, Any]) -> JSONR
 
 
 async def handle_nvidia_stream(model: str, payload: dict[str, Any]) -> StreamingResponse | JSONResponse:
+    # Same fallback path as the non-streaming variant, but preserve SSE output.
     if not nvidia_client.available:
         return stream_error(model, "NVIDIA fallback is not configured", 503)
     try:
@@ -541,6 +568,8 @@ async def handle_nvidia_stream(model: str, payload: dict[str, Any]) -> Streaming
 
 
 async def stream_router_sse(iterator: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    # Ensure the stream always terminates cleanly with a [DONE] marker even if
+    # the upstream provider forgets to send one.
     saw_done = False
     async for chunk in iterator:
         if b"data: [DONE]" in chunk:
@@ -551,6 +580,7 @@ async def stream_router_sse(iterator: AsyncIterator[bytes]) -> AsyncIterator[byt
 
 
 async def stream_with_active_count(iterator: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    # Track in-flight streaming requests so the stats endpoint can report them.
     global active_requests
     try:
         async for chunk in iterator:
@@ -560,6 +590,8 @@ async def stream_with_active_count(iterator: AsyncIterator[bytes]) -> AsyncItera
 
 
 def stream_error(model: str, message: str, status: int) -> StreamingResponse:
+    # Stream errors in the same SSE shape the clients already expect, rather
+    # than switching response formats mid-flight.
     async def iterator() -> AsyncIterator[bytes]:
         async for chunk in sse_from_text(model, f"KeyHive proxy error ({status}): {message}"):
             yield chunk
@@ -573,6 +605,7 @@ def stream_error(model: str, message: str, status: int) -> StreamingResponse:
 
 
 def main() -> None:
+    # Keep the process simple: parse host/port overrides and hand off to uvicorn.
     parser = argparse.ArgumentParser(description="Run the KeyHive OpenAI-compatible proxy.")
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", default=PORT, type=int)

@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 
+# These helpers adapt Hugging Face and NVIDIA responses into the OpenAI or
+# Anthropic shapes that the local proxy exposes to clients.
 def completion_id() -> str:
     return f"chatcmpl_{uuid.uuid4().hex}"
 
@@ -22,6 +24,8 @@ def openai_error(message: str, code: str, status: int) -> dict[str, Any]:
 
 
 def normalize_messages(messages: Any) -> list[dict[str, str]]:
+    # Accept the standard message arrays and flatten any text-part content so
+    # upstream providers receive something they can actually process.
     if not isinstance(messages, list) or not messages:
         raise ValueError("messages must be a non-empty array")
 
@@ -87,6 +91,8 @@ async def sse_from_text(model: str, text: str) -> AsyncIterator[bytes]:
 
 
 def extract_router_content(payload: dict[str, Any]) -> str:
+    # Router responses can nest the actual text in a few different places, so
+    # walk the common shapes before falling back to the raw payload.
     choices = payload.get("choices")
     if isinstance(choices, list) and choices:
         first = choices[0]
@@ -119,6 +125,8 @@ def anthropic_response(model: str, content: str) -> dict[str, Any]:
 
 
 async def anthropic_sse(model: str, content: str) -> AsyncIterator[bytes]:
+    # Stream a minimal Anthropic-compatible event sequence. The proxy only
+    # needs enough structure for clients to accept the completion.
     message = anthropic_response(model, "")
     yield f"event: message_start\ndata: {json.dumps({'type': 'message_start', 'message': message}, separators=(',', ':'))}\n\n".encode()
     yield b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"

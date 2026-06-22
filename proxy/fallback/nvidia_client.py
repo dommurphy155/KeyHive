@@ -7,6 +7,9 @@ from typing import Any
 import httpx
 
 
+# Thin wrapper around NVIDIA's chat-completions endpoint. It mirrors the HF
+# client shape so the proxy can swap providers without special-casing response
+# handling all over the place.
 @dataclass
 class NvidiaResponse:
     status_code: int
@@ -23,6 +26,8 @@ class NvidiaClient:
 
     @property
     def available(self) -> bool:
+        # The proxy only treats NVIDIA as usable when the key looks like a real
+        # nvapi-* credential.
         return self.api_key.startswith("nvapi-")
 
     async def close(self) -> None:
@@ -63,6 +68,8 @@ class NvidiaClient:
 
     @staticmethod
     def _chat_url(base_url: str) -> str:
+        # Accept either the bare API root or a full /chat/completions URL so the
+        # installer and runtime config can use whichever shape is easiest.
         url = base_url.rstrip("/")
         if url.endswith("/chat/completions"):
             return url
