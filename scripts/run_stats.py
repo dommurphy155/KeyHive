@@ -8,6 +8,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+# This file is the bookkeeping layer for scanner runs. It keeps both
+# since-restart and all-time counters so the CLI and web UI can report the same
+# numbers without parsing logs repeatedly.
 ROOT_DIR = Path("/root/api_maker")
 STATS_FILE = ROOT_DIR / "data" / "run_stats.json"
 LOCK_FILE = ROOT_DIR / "data" / "run_stats.lock"
@@ -101,6 +104,8 @@ def normalize_bucket(raw: object, include_started_at: bool = False) -> dict:
 
 
 def migrate_flat_stats(raw: dict) -> dict:
+    # Older stats files were flat. This migration keeps them readable instead of
+    # breaking the dashboard the first time it sees an old JSON shape.
     return {
         "since_restart": empty_bucket(utc_now()),
         "all_time": normalize_bucket(raw),
@@ -135,6 +140,7 @@ def read_stats() -> dict:
 
 
 def write_stats(stats: dict) -> None:
+    # Write through a temporary file so stats updates are atomic on disk.
     STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     temp_file = STATS_FILE.with_suffix(".json.tmp")
     temp_file.write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
@@ -143,6 +149,8 @@ def write_stats(stats: dict) -> None:
 
 @contextmanager
 def stats_lock():
+    # The scheduler and manual runs can update stats concurrently, so this lock
+    # prevents one process from clobbering another's counters.
     STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOCK_FILE.open("w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -165,6 +173,8 @@ def reset_since_restart() -> None:
 
 
 def classify_failure(output: str, return_code: int) -> str | None:
+    # The caller records broad failure classes instead of trying to preserve
+    # every possible error string verbatim.
     lowered = output.lower()
     if return_code == 0 and "saved to /root/api_maker/data/keys.txt" in lowered:
         return None
@@ -188,6 +198,8 @@ def increment_bucket(bucket: dict, success: bool, failure_reason: str | None) ->
 
 
 def record_run(output: str, return_code: int) -> str | None:
+    # Record both the since-restart bucket and the all-time bucket in one locked
+    # transaction so the dashboard does not briefly report nonsense.
     with stats_lock():
         stats = read_stats()
         failure_reason = classify_failure(output, return_code)

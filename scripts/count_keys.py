@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+# The key counter reads the canonical output file used by hf_keys.js and turns
+# it into a rough value estimate for reporting purposes.
 KEYS_FILE = Path("/root/api_maker/data/keys.txt")
 LAST_COUNT_FILE = Path("/root/api_maker/data/.last_key_count")
 
@@ -39,6 +41,8 @@ def save_current_count(count):
 
 
 def main():
+    # The file count is the source of truth; the last-count cache only exists to
+    # show how the key pool changed since the previous report.
     if not KEYS_FILE.exists():
         print(f"\n[-] File not found: {KEYS_FILE}\n")
         sys.exit(1)

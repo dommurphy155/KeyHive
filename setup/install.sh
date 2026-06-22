@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Bootstrap the local KeyHive environment, install the minimum runtime pieces,
+# and hand off to the interactive Python installer once the basics are ready.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/.venv"
@@ -42,6 +44,8 @@ run_privileged() {
 }
 
 install_base_packages() {
+  # On Debian-like hosts this fills in the obvious runtime gaps. On other hosts
+  # it just gets out of the way instead of trying to be clever.
   if ! have apt-get; then
     return
   fi
@@ -81,6 +85,8 @@ install_base_packages() {
 main() {
   cd "$PROJECT_DIR"
 
+  # Python is the only hard requirement at this stage; everything else can be
+  # installed or skipped by the guided installer.
   have python3 || die "python3 is required"
   install_base_packages
 

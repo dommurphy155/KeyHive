@@ -18,6 +18,9 @@ from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 
+# The installer wires together the scanner, proxy, CLI, Web UI, and credentials
+# into one local environment. It is intentionally interactive because the
+# project needs real API keys and Gmail accounts, not fake placeholders.
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SETUP_DIR = PROJECT_DIR / "setup"
 DATA_DIR = PROJECT_DIR / "data"
@@ -31,6 +34,8 @@ PACKAGE_JSON = PROJECT_DIR / "package.json"
 KEYHIVE_BIN = PROJECT_DIR / "bin" / "keyhive"
 GLOBAL_KEYHIVE = Path("/usr/local/bin/keyhive")
 
+# Claude Code expects an API-key-shaped value even though requests are routed to
+# the local proxy. This is a placeholder string, not a real Anthropic secret.
 ANTHROPIC_KEY = "sk-ant-api03-R2D2C3POfakeDemoKeyOnlyDoNotUse1234567890abcdefABCDEFfakeKEYexample999999999999AA"
 ENV_BLOCK_START = "# >>> keyhive proxy env >>>"
 ENV_BLOCK_END = "# <<< keyhive proxy env <<<"
@@ -80,6 +85,8 @@ def load_env() -> dict[str, str]:
 
 
 def set_env_values(values: dict[str, str]) -> None:
+    # Preserve unrelated .env entries and only replace the keys the installer
+    # owns. That keeps existing local settings from getting stomped.
     existing = ENV_FILE.read_text().splitlines() if ENV_FILE.exists() else []
     remaining = dict(values)
     out: list[str] = []
@@ -117,6 +124,8 @@ def show_banner() -> None:
 
 
 def check_environment() -> None:
+    # This is a preflight report, not a hard gate. It tells the user what is
+    # already present before the installer starts mutating files.
     table = Table(title="Environment", show_header=True, header_style="bold cyan")
     table.add_column("Check", style="bold")
     table.add_column("Value")
@@ -133,6 +142,8 @@ def check_environment() -> None:
 
 
 def ensure_runtime_files() -> None:
+    # Create the state directories and sentinel files that the scanner, proxy,
+    # and web UI expect to exist at runtime.
     console.print("[bold cyan]Runtime files[/bold cyan]")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (PROJECT_DIR / "logs").mkdir(parents=True, exist_ok=True)
@@ -148,6 +159,8 @@ def ensure_runtime_files() -> None:
 
 
 def ensure_package_json() -> None:
+    # Only create package.json if the repo does not already have one. The Node
+    # scripts are tiny, so the generated metadata stays minimal.
     if PACKAGE_JSON.exists():
         return
     PACKAGE_JSON.write_text(
@@ -170,6 +183,8 @@ def ensure_package_json() -> None:
 
 
 def install_node_runtime() -> None:
+    # The scanner depends on Node + Playwright. If the host lacks them, the
+    # installer warns instead of trying to synthesize a broken runtime.
     console.print("[bold cyan]Node runtime[/bold cyan]")
     if not have("node") or not have("npm"):
         console.print("[yellow]node/npm missing; install them before scanner automation.[/yellow]")
@@ -182,6 +197,8 @@ def install_node_runtime() -> None:
 
 
 def install_web_ui_runtime() -> None:
+    # The current frontend is static, so there is no mandatory frontend build
+    # step unless a package.json appears later.
     console.print("[bold cyan]Web UI runtime[/bold cyan]")
     WEB_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
     WEB_BACKEND_DIR.mkdir(parents=True, exist_ok=True)
@@ -195,6 +212,8 @@ def install_web_ui_runtime() -> None:
 
 
 def install_systemd_units() -> None:
+    # Copy the project-local unit files into /etc/systemd/system when the host
+    # permits it, then reload systemd so the units are visible immediately.
     console.print("[bold cyan]Systemd services[/bold cyan]")
     if not have("systemctl") or not Path("/etc/systemd/system").exists():
         console.print("[yellow]systemd not available; skipping service install.[/yellow]")
@@ -213,6 +232,8 @@ def install_systemd_units() -> None:
 
 
 def install_cli() -> None:
+    # Make the wrapper executable and expose it as /usr/local/bin/keyhive so the
+    # operator does not have to remember the repo path every time.
     KEYHIVE_BIN.chmod(KEYHIVE_BIN.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     if os.geteuid() == 0:
         if GLOBAL_KEYHIVE.exists() or GLOBAL_KEYHIVE.is_symlink():
@@ -224,6 +245,8 @@ def install_cli() -> None:
 
 
 def prompt_agentmail() -> None:
+    # The setup flow captures secrets interactively rather than leaving them in
+    # shell history or command-line arguments.
     console.print(Panel("AgentMail is used for burner inboxes and confirmation emails.\nGet a key from your AgentMail dashboard/account.\nThe key must start with: [bold]am_us[/bold]", border_style="cyan"))
     while True:
         key = hidden_prompt("Enter your AgentMail API key")
@@ -235,6 +258,8 @@ def prompt_agentmail() -> None:
 
 
 def prompt_nvidia() -> None:
+    # NVIDIA is the fallback provider when Hugging Face keys run low or the
+    # proxy decides to switch away from HF temporarily.
     console.print(Panel("NVIDIA API key is used as the free/slow fallback model provider while KeyHive builds Hugging Face keys.\nGo to NVIDIA Build, log in, and click Get API Key.\nThe key must start with: [bold]nvapi-[/bold]", border_style="cyan"))
     while True:
         key = hidden_prompt("Enter your NVIDIA API key")
@@ -246,6 +271,8 @@ def prompt_nvidia() -> None:
 
 
 def read_existing_gmail() -> list[dict[str, str]]:
+    # Existing Gmail accounts are stored in .env as JSON, so the installer needs
+    # to parse that list before asking whether to keep, replace, or append.
     raw = load_env().get("GMAIL_ACCOUNTS", "")
     if not raw:
         return []
@@ -263,6 +290,8 @@ def read_existing_gmail() -> list[dict[str, str]]:
 
 
 def collect_gmail_accounts() -> list[dict[str, str]]:
+    # The browser automation only works with dedicated automation accounts, so
+    # this collects them one by one instead of pretending a single secret is enough.
     count = IntPrompt.ask("How many Gmail accounts do you want to add?", default=1)
     accounts: list[dict[str, str]] = []
     for idx in range(1, count + 1):
@@ -281,6 +310,8 @@ def collect_gmail_accounts() -> list[dict[str, str]]:
 
 
 def prompt_gmail() -> None:
+    # Gmail 2FA must be off for the current automation flow, so the installer
+    # says that up front instead of letting the browser fail later.
     console.print(
         Panel(
             "[bold red]WARNING:[/bold red]\n"
@@ -309,6 +340,8 @@ def prompt_gmail() -> None:
 
 
 def configure_proxy_env_defaults() -> None:
+    # Populate the proxy settings with sensible defaults while leaving any
+    # existing explicit .env values alone.
     defaults = {
         "KEYHIVE_PROXY_HOST": "127.0.0.1",
         "KEYHIVE_PROXY_PORT": "8787",
@@ -344,6 +377,9 @@ def shell_config_path() -> Path:
 
 
 def configure_claude_env() -> None:
+    # Claude Code is pointed at the local proxy via shell startup files. This
+    # is a shell-profile edit, so the installer tells the user exactly where it
+    # wrote the block.
     target = shell_config_path()
     block = (
         f"{ENV_BLOCK_START}\n\n"
@@ -363,6 +399,8 @@ def configure_claude_env() -> None:
 
 
 def install_claude_code() -> None:
+    # The installer does not depend on Claude Code being present, but if it is
+    # missing we try to install it and then wire the shell to the local proxy.
     console.print("[bold cyan]Claude Code[/bold cyan]")
     if not have("claude"):
         console.print("[yellow]Claude Code not found; installing via claude.ai installer.[/yellow]")
@@ -372,6 +410,8 @@ def install_claude_code() -> None:
 
 
 def final_message() -> None:
+    # The final panel is the operator cheat sheet: what was installed, what the
+    # proxy URL is, and which commands to use next.
     console.print(
         Panel(
             "[bold green]KeyHive setup complete.[/bold green]\n\n"
@@ -397,6 +437,8 @@ def final_message() -> None:
 
 
 def main() -> None:
+    # Run the setup in a linear order so the user sees each prerequisite before
+    # the installer starts prompting for secrets.
     show_banner()
     check_environment()
     ensure_runtime_files()

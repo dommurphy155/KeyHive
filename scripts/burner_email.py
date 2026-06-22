@@ -41,6 +41,8 @@ class AgentMailManager:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     async def list_inboxes(self) -> list:
+        # The wrapper accepts both the raw list response and the older
+        # {"inboxes": [...]} envelope because AgentMail has changed shapes before.
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.get(f"{self.BASE}/inboxes", headers=self._headers(), timeout=30)
@@ -51,6 +53,8 @@ class AgentMailManager:
             return []
 
     async def nuke_all(self):
+        # The temporary inboxes are disposable, so wipe them before creating a
+        # fresh one to reduce cross-run confusion and quota noise.
         try:
             async with httpx.AsyncClient() as client:
                 inboxes = await self.list_inboxes()
@@ -64,6 +68,8 @@ class AgentMailManager:
         self.active = []
 
     async def create_inbox(self) -> dict:
+        # Retry a few times because the upstream API occasionally refuses a
+        # fresh inbox until older ones have been cleared out.
         for attempt in range(6):
             try:
                 async with httpx.AsyncClient() as client:
@@ -83,6 +89,8 @@ class AgentMailManager:
         raise RuntimeError("AgentMail: could not create inbox after 6 attempts")
 
     async def get_confirmation_link(self, inbox_id: str, timeout: int = 150) -> Optional[str]:
+        # Poll the inbox until the Hugging Face confirmation URL appears in the
+        # message body, then return the link for the browser flow.
         start = time.time()
         async with httpx.AsyncClient() as client:
             while time.time() - start < timeout:
@@ -111,6 +119,8 @@ class AgentMailManager:
         return None
 
     async def delete_inbox(self, inbox_id: str):
+        # Inbox cleanup is best-effort; if it fails, the state file still gets
+        # removed so later runs do not keep chasing the stale inbox id.
         try:
             async with httpx.AsyncClient() as client:
                 r = await client.delete(f"{self.BASE}/inboxes/{inbox_id}", headers=self._headers(), timeout=30)
@@ -120,6 +130,8 @@ class AgentMailManager:
 
 
 async def cmd_create():
+    # Create a fresh disposable inbox and store the inbox id so `check` and
+    # `burn` know which mailbox to inspect or delete later.
     load_dotenv(ENV_FILE)
     api_key = os.getenv("AGENTMAIL_API_KEY")
     if not api_key:
@@ -130,7 +142,7 @@ async def cmd_create():
     inboxes = await mgr.list_inboxes()
     print(f"[AgentMail] Found {len(inboxes)} existing inbox(es)", file=sys.stderr)
 
-    # Nuke anything that exists before creating fresh
+    # Nuke anything that exists before creating fresh.
     if len(inboxes) >= 1:
         print("[AgentMail] Nuking all existing inboxes before creating fresh...", file=sys.stderr)
         await mgr.nuke_all()
@@ -139,7 +151,8 @@ async def cmd_create():
     inbox = await mgr.create_inbox()
     inbox_id = inbox.get("inbox_id") or inbox.get("id")
 
-    # Try every plausible field name for the full address
+    # Try every plausible field name for the full address because AgentMail has
+    # returned several response shapes over time.
     address = inbox.get("address") or inbox.get("email")
     if not address:
         local = (
@@ -161,6 +174,8 @@ async def cmd_create():
 
 
 async def cmd_check():
+    # The state file is the only thing that ties this poll back to the inbox
+    # created earlier in the run.
     if not os.path.exists(STATE_FILE):
         print("Error: No state file. Run 'create' first.", file=sys.stderr)
         sys.exit(1)
@@ -184,6 +199,8 @@ async def cmd_check():
 
 async def cmd_burn():
     """Delete the inbox after use and clean up state."""
+    # Best-effort cleanup: delete the remote inbox if possible, then remove the
+    # local state file so the next run starts clean.
     if not os.path.exists(STATE_FILE):
         print("[AgentMail] No state file to burn.", file=sys.stderr)
         return

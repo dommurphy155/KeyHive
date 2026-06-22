@@ -11,6 +11,8 @@ from pathlib import Path
 
 from run_stats import ensure_stats_file, record_run
 
+# The scheduler is intentionally boring: it repeatedly executes the scanner,
+# records outcomes, and sleeps the remainder of the fixed cycle.
 ROOT_DIR = Path("/root/api_maker")
 SCRIPT_DIR = Path("/root/api_maker/scripts")
 HF_KEYS_JS = SCRIPT_DIR / "hf_keys.js"
@@ -38,6 +40,8 @@ def emit_raw(text: str) -> None:
 
 
 def run_hf_keys(run_number: int) -> None:
+    # Stream stdout/stderr from the Node script directly into the terminal and
+    # the run statistics file so failures are visible while they happen.
     now = datetime.now()
     header = f"==={fmt_dt(now)}, run {run_number}==="
     emit(header)
@@ -69,6 +73,8 @@ def run_hf_keys(run_number: int) -> None:
     if run_number < RUNS_PER_CYCLE:
         emit(f"===end of run {run_number}===\n")
     else:
+        # The last run in the cycle still waits out the full 90-minute window
+        # before the next loop begins.
         next_run = datetime.now() + timedelta(minutes=90)
         emit(f"===End of run {run_number}. Next run at {fmt_dt(next_run)}===\n")
 
@@ -94,7 +100,8 @@ def main():
                 emit(f"Next run at {fmt_dt(next_run_time)}\n")
                 time.sleep(sleep_for)
 
-        # Wait out the remainder of the 90-min window before next cycle
+        # Wait out the remainder of the 90-minute window before next cycle so
+        # the total cadence stays fixed even when individual runs finish early.
         cycle_elapsed = time.monotonic() - cycle_start
         cycle_remainder = max(0, (90 * 60) - cycle_elapsed)
         if cycle_remainder > 0:

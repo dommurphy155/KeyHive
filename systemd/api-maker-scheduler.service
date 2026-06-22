@@ -1,9 +1,12 @@
 [Unit]
+# Runs the long-lived scheduler that repeatedly executes scripts/scheduler.py.
 Description=API Maker Scheduler
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+# Root is used here because the scheduler launches a visible Chrome session and
+# manages repo-local runtime files under /root/api_maker.
 Type=simple
 User=root
 WorkingDirectory=/root/api_maker

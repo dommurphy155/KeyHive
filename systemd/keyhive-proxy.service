@@ -1,9 +1,13 @@
 [Unit]
+# Hosts the local OpenAI-compatible proxy that serves Hugging Face and NVIDIA
+# completions out of the same stable 127.0.0.1 endpoint.
 Description=KeyHive Local OpenAI-Compatible Proxy
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+# The proxy is local-only, but it still needs the repo path, key file, and
+# fallback provider configuration injected through environment variables.
 Type=simple
 User=root
 WorkingDirectory=/root/api_maker

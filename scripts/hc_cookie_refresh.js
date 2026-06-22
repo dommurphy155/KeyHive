@@ -1,4 +1,6 @@
-// cookie_refresh.js
+// Refresh the hCaptcha accessibility cookie jar from the ready browser
+// profiles produced by browser_strength.js. The saved cookie file is the
+// only output hf_keys.js cares about.
 "use strict";
 
 const { chromium } = require("playwright");
@@ -9,6 +11,8 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 require("dotenv").config({ path: path.join(ROOT_DIR, ".env") });
 
 // ─── Config ────────────────────────────────────────────────────────────────
+// These paths and ports are shared with the browser-strength flow so this
+// script can reuse the exact same visible Chrome session.
 const LOGIN_URL    = "https://dashboard.hcaptcha.com/login?type=accessibility";
 const CDP_PORT     = 9333;
 const CDP_HOST     = "127.0.0.1";
@@ -42,7 +46,8 @@ const dbg  = (msg) => { if (process.env.DEBUG) console.log(`[${ts()}]   ${msg}`)
 const sleep      = (ms)  => new Promise((r) => setTimeout(r, ms));
 const humanDelay = (min = 500, max = 1200) => sleep(min + Math.random() * (max - min));
 
-// ─── Load accounts from GMAIL_ACCOUNTS JSON array ─────────────────────────
+// Load Gmail credentials from the shared .env file. The refresh script uses the
+// same account list that browser_strength.js validates and checkpoints.
 function loadAccounts() {
   const raw = process.env.GMAIL_ACCOUNTS;
   if (!raw) {
@@ -63,7 +68,9 @@ function loadAccounts() {
   }
 }
 
-// ─── Save ALL hcaptcha cookies to disk ─────────────────────────────────────
+// Save the cookie jar atomically so hf_keys.js never reads a half-written file.
+// This is intentionally strict: without an accessibility cookie, the write is
+// rejected because the refresh did not actually succeed.
 function saveCookies(cookies) {
   fs.mkdirSync(path.dirname(COOKIE_OUT), { recursive: true });
   const finalCookies = normalizeHcCookies(cookies);
@@ -90,6 +97,7 @@ function statusPath(value) {
 }
 
 function readyProfileDir(account) {
+  // Only profiles that browser_strength.js marked as fully ready are eligible.
   const status = readAccountStatus()[account.email];
   if (!status || typeof status.profileDir !== "string") return null;
 
@@ -114,6 +122,8 @@ function isProfileReady(account) {
 }
 
 function ensureReadyProfiles(accounts) {
+  // If the profile state file says an account is stale or incomplete, rerun the
+  // browser-strength prep step before trying to refresh cookies.
   fs.mkdirSync(PROFILE_ROOT, { recursive: true });
   fs.mkdirSync(STRENGTH_DIR, { recursive: true });
   fs.mkdirSync(path.dirname(CHROME_LOG), { recursive: true });
@@ -173,6 +183,8 @@ function launchChrome(profileDir) {
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
+        // Keep the launch shape consistent with the prep script so the browser
+        // fingerprint stays stable across the two phases of the flow.
         "--disable-blink-features=AutomationControlled",
         "--password-store=basic",
         "--use-mock-keychain",
@@ -236,6 +248,8 @@ async function killChrome(child, profileDir) {
 
 // ─── Poll primitives ───────────────────────────────────────────────────────
 async function pollForAny(page, label, candidates, timeout = POLL_TIMEOUT) {
+  // hCaptcha and Google both vary their DOM enough that the code needs a
+  // fallback selector list rather than one brittle locator.
   dbg(`[${label}] polling ${candidates.length} candidate(s)...`);
   const deadline = Date.now() + timeout;
 
@@ -281,6 +295,8 @@ async function visible(locator) {
 }
 
 async function selectGoogleAccountIfShown(page, account) {
+  // When Google offers an account chooser, reuse the existing session instead
+  // of forcing another password prompt.
   try {
     const accountOption = page.getByText(account.email, { exact: true });
     if (await visible(accountOption)) {
@@ -294,6 +310,8 @@ async function selectGoogleAccountIfShown(page, account) {
 }
 
 async function findSetCookieButton(context, timeout = POLL_TIMEOUT) {
+  // The accessibility dashboard sometimes exposes "Set Cookie" on a different
+  // page or in a different control shape, so scan every open page.
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
@@ -314,6 +332,8 @@ async function findSetCookieButton(context, timeout = POLL_TIMEOUT) {
 }
 
 async function trySetCookieAndExtract(context, label, timeout = 500) {
+  // Click the accessibility control and then verify the cookie jar actually
+  // contains the hCaptcha accessibility token before we claim success.
   const { dashPage, setCookieEl } = await findSetCookieButton(context, timeout);
   if (!dashPage || !setCookieEl) return null;
 
@@ -393,7 +413,7 @@ function hasAccessibilityCookie(cookies) {
 }
 
 async function extractHcCookies(context, page) {
-  // Method 1 — CDP (catches HttpOnly + gives domain/expires)
+  // Method 1 - CDP (catches HttpOnly + gives domain/expires).
   try {
     const cdp    = await context.newCDPSession(page);
     const result = await cdp.send("Network.getAllCookies");
@@ -406,7 +426,7 @@ async function extractHcCookies(context, page) {
     dbg(`CDP extract failed: ${err.message}`);
   }
 
-  // Method 2 — context.cookies()
+  // Method 2 - context.cookies() as a fallback when CDP is flaky.
   try {
     const all = await context.cookies(["https://dashboard.hcaptcha.com", "https://hcaptcha.com", "https://accounts.hcaptcha.com", "https://api.hcaptcha.com"]);
     const hcCookies = normalizeHcCookies(all);
@@ -424,6 +444,8 @@ class QuotaError extends Error {
 }
 
 function checkBodyForQuota(bodyText) {
+  // If hCaptcha says the account quota is spent, the caller blacklists the
+  // Gmail account and moves on instead of hammering the same dead session.
   for (const phrase of QUOTA_PHRASES) {
     if (bodyText.toLowerCase().includes(phrase)) throw new QuotaError(phrase);
   }
@@ -431,6 +453,8 @@ function checkBodyForQuota(bodyText) {
 
 // ─── Single account attempt ────────────────────────────────────────────────
 async function attemptAccount(account) {
+  // One account attempt is one browser session: open the ready profile, reach
+  // hCaptcha, click Set Cookie, and export the resulting cookies.
   const profileDir  = readyProfileDir(account);
   let chromeProcess = null;
   let browser       = null;
@@ -461,6 +485,8 @@ async function attemptAccount(account) {
     if (cookies) return cookies;
 
     // ── 2. Sign in with Google ───────────────────────────────────────────────
+    // The dashboard may already expose Set Cookie, so the script checks for it
+    // before and after the Google sign-in path.
     step("Clicking Sign in with Google...");
     await pollAndClick(page, "SignInWithGoogle", [
       { description: 'getByRole button "sign in with google"', locatorFn: (p) => p.getByRole("button", { name: /sign in with google/i }) },
@@ -516,6 +542,8 @@ async function attemptAccount(account) {
       await humanDelay(700, 1200);
 
       // ── 5. Next ──────────────────────────────────────────────────────────────
+      // Google keeps moving the Next control around; this tries the common
+      // button, div, and role-based variants before giving up.
       await pollAndClick(googlePage, "EmailNext", [
         { description: "#identifierNext",           locatorFn: (p) => p.locator("#identifierNext") },
         { description: 'button[jsname="LgbsSe"]',  locatorFn: (p) => p.locator('button[jsname="LgbsSe"]') },
@@ -565,6 +593,8 @@ async function attemptAccount(account) {
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 async function main() {
+  // Account quota failures get blacklisted so a single dead Gmail profile does
+  // not block the rest of the batch.
   const accounts  = loadAccounts();
   const blacklist = new Set();
 

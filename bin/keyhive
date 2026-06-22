@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# `keyhive` is the operator-facing wrapper around the scanner, proxy, web UI,
+# and diagnostics. It deliberately keeps the real scripts and systemd unit
+# names centralized here so the rest of the repo can stay boring.
 ROOT_DIR="/root/api_maker"
 SCRIPTS_DIR="$ROOT_DIR/scripts"
 DATA_DIR="$ROOT_DIR/data"
@@ -27,6 +30,8 @@ fi
 
 NODE_BIN="$(command -v node || true)"
 
+# When the shell is interactive, print colored status blocks. In non-TTY mode
+# the wrapper falls back to plain text so logs stay readable.
 if [ -t 1 ]; then
   BOLD="$(printf '\033[1m')"
   DIM="$(printf '\033[2m')"
@@ -54,6 +59,7 @@ row() {
 }
 
 usage() {
+  # This is the canonical quick reference for the repo's operational surface.
   printf "%sKEYHIVE%s\n" "$BOLD" "$RESET"
   printf "API key automation + local AI proxy control\n"
 
@@ -104,6 +110,8 @@ usage() {
 }
 
 need_project() {
+  # Fail early if the repo path or scanner script is missing. Everything else
+  # assumes the project root is sane.
   if [ ! -d "$ROOT_DIR" ]; then
     echo "✗ Project folder missing: $ROOT_DIR" >&2
     exit 1
@@ -123,6 +131,8 @@ need_node() {
 }
 
 service_exists() {
+  # The wrapper checks unit-file presence before calling systemctl so it can
+  # print a useful install-path hint instead of a bare systemctl failure.
   systemctl list-unit-files "$SERVICE" >/dev/null 2>&1
 }
 
@@ -143,6 +153,8 @@ start_service() {
     exit 1
   fi
 
+  # The stats file is created before the service starts so the scheduler has a
+  # consistent counter file from the first boot.
   "$PYTHON_BIN" "$RUN_STATS_PY" ensure >/dev/null
   systemctl start "$SERVICE"
   echo "✓ keyhive scanner started"
@@ -165,6 +177,7 @@ restart_service() {
     exit 1
   fi
 
+  # Restarting the scanner also resets the since-restart stats bucket.
   "$PYTHON_BIN" "$RUN_STATS_PY" reset-since-restart >/dev/null
   systemctl restart "$SERVICE"
   echo "✓ keyhive scanner restarted"
@@ -172,6 +185,8 @@ restart_service() {
 }
 
 show_status() {
+  # Report the live systemd state plus the local key/cookie/run files that the
+  # scanner and proxy depend on.
   section "KEYHIVE SCANNER"
   printf "  Project: %-24s %s\n" "$ROOT_DIR" ""
   printf "  Service: %s\n\n" "$SERVICE"
@@ -300,6 +315,7 @@ run_report() {
 }
 
 parse_runs_amount() {
+  # Support the slightly annoying historical command shapes used by this repo.
   raw="${1:-}"
 
   case "$raw" in
@@ -325,6 +341,8 @@ parse_runs_amount() {
 }
 
 run_manual() {
+  # Run the Node scanner directly outside systemd, then record each invocation
+  # in the same stats file the scheduler uses.
   need_project
   need_node
 
@@ -390,6 +408,7 @@ doctor_fail() {
 }
 
 env_value() {
+  # Read a specific key from .env without sourcing the entire file.
   key="$1"
   if [ ! -f "$ROOT_DIR/.env" ]; then
     return
@@ -450,6 +469,8 @@ PY
 }
 
 doctor_check_imports() {
+  # Validate that the Python runtime can import the modules the service code
+  # expects before someone starts the scanner and learns about it the hard way.
   "$PYTHON_BIN" - <<'PY'
 mods = ["fastapi", "uvicorn", "httpx", "rich", "dotenv"]
 missing = []
@@ -470,6 +491,8 @@ doctor_check_node_module() {
 }
 
 run_doctor() {
+  # The doctor command is a local health check, not a service manager. It
+  # checks files, deps, services, and proxy health in one pass.
   section "KEYHIVE DOCTOR"
 
   warnings=0
@@ -664,6 +687,7 @@ curl_json() {
 }
 
 proxy_status() {
+  # The proxy status path shows both systemd state and the live /health payload.
   section "KEYHIVE PROXY"
   printf "  %-12s %s\n" "Service:" "$PROXY_SERVICE"
   printf "  %-12s %s\n\n" "URL:" "$PROXY_URL"
@@ -679,6 +703,8 @@ proxy_status() {
 }
 
 proxy_stats() {
+  # This mirrors the proxy /stats endpoint so operators can inspect provider
+  # routing without manually curling JSON.
   section "KEYHIVE PROXY STATS"
   body="$(curl -fsS "$PROXY_URL/stats" 2>/dev/null || true)"
   if [ -z "$body" ]; then
@@ -713,6 +739,8 @@ PY
 }
 
 proxy_fallback() {
+  # This is a human-friendly summary of the fallback decision state. It exists
+  # because the raw stats JSON is accurate but not exactly pleasant.
   if ! command -v curl >/dev/null 2>&1; then
     echo "✗ curl not found" >&2
     exit 1

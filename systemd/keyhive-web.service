@@ -1,9 +1,13 @@
 [Unit]
+# Serves the Web UI that reports scanner/proxy state and exposes the local
+# control endpoints behind FastAPI.
 Description=KeyHive Web UI
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+# The UI stays on localhost by default; the host/port values are still exposed
+# so the installer and dashboard can report them consistently.
 Type=simple
 User=root
 WorkingDirectory=/root/api_maker

@@ -1,4 +1,7 @@
-// ~/api_maker/hf_keys.js
+// Main Hugging Face key creation flow.
+// This script refreshes hCaptcha cookies when needed, creates a burner inbox,
+// walks the Hugging Face signup flow, confirms the email, extracts the write
+// token, and appends it to data/keys.txt.
 "use strict";
 
 const { chromium } = require("playwright");
@@ -10,6 +13,8 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 require("dotenv").config({ path: path.join(ROOT_DIR, ".env") });
 
 // ─── Config ────────────────────────────────────────────────────────────────
+// COOKIE_PATH is the single cookie cache that hc_cookie_refresh.js writes and
+// ensureCookies() consumes before any signup attempt begins.
 const COOKIE_PATH    = path.join(ROOT_DIR, "data", "hc_cookie.json");
 const KEYS_PATH      = path.join(ROOT_DIR, "data", "keys.txt");
 const REFRESH_SCRIPT = path.join(ROOT_DIR, "scripts", "hc_cookie_refresh.js");
@@ -21,6 +26,8 @@ const HCAPTCHA_COOKIE_URLS = [
   "https://api.hcaptcha.com",
 ];
 
+// Chrome runs with a separate CDP port and profile so the signup flow can be
+// observed and cleaned up without disturbing the browser-strength profiles.
 const CDP_PORT  = 9334;
 const CDP_HOST  = "127.0.0.1";
 const X_DISPLAY = ":1";
@@ -102,6 +109,8 @@ async function ensureCookies() {
   }
 
   if (needsRefresh) {
+    // The refresh flow is expensive, so only rerun it when the cookie file is
+    // missing or stale enough to be suspicious.
     step("Running hc_cookie_refresh.js...");
     try {
       execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
@@ -113,7 +122,7 @@ async function ensureCookies() {
   }
 
   const data = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf-8"));
-  // Support both old single-cookie format and new array format
+  // Support both the old single-cookie format and the current array format.
   return Array.isArray(data) ? data : [data];
 }
 
@@ -132,6 +141,8 @@ function getBurnerEmail() {
 }
 
 function getConfirmationLink() {
+  // burner_email.py polls AgentMail until the Hugging Face confirmation URL is
+  // visible, then returns the link for the browser session to open.
   step("Waiting for confirmation email...");
   try {
     const output = execSync(`python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" });
@@ -151,6 +162,8 @@ function getConfirmationLink() {
 }
 
 function burnInbox() {
+  // Inbox cleanup is non-critical, but it keeps AgentMail from accumulating
+  // dead mailboxes across retries.
   step("Burning burner email inbox...");
   try {
     execSync(`python3 ${BURNER_SCRIPT} burn`, { encoding: "utf-8" });
@@ -197,6 +210,8 @@ function toPlaywrightCookie(cookie) {
 }
 
 async function injectHcCookies(context, cookies) {
+  // Playwright can accept malformed cookie objects and then quietly do the
+  // wrong thing, so verify the cookies are actually visible after injection.
   const normalized = cookies.map(toPlaywrightCookie);
   await context.addCookies(normalized);
 
@@ -235,6 +250,8 @@ function launchChrome(profileDir) {
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
+        // This is a visible browser, not a headless science project; keep the
+        // launch shape stable enough that Google does not immediately freak out.
         "--disable-blink-features=AutomationControlled",
         "--use-gl=swiftshader",
         "--use-angle=swiftshader-webgl",
@@ -263,6 +280,8 @@ function launchChrome(profileDir) {
     let done = false;
     const deadline = Date.now() + 15000;
 
+    // The flow waits for /json/version so Playwright only attaches after Chrome
+    // is actually ready instead of guessing and dying on startup races.
     const poll = setInterval(async () => {
       if (done) return;
       try {
@@ -290,6 +309,8 @@ function killChrome(child) {
 
 // ─── Main Flow ────────────────────────────────────────────────────────────
 async function runOnce(attempt = 1, maxAttempts = 2) {
+  // One run means one full signup attempt. If hCaptcha blocks the flow, the
+  // script refreshes cookies once and retries before giving up.
   const cookies  = await ensureCookies();
   const email    = getBurnerEmail();
   const password = generatePassword();
@@ -391,6 +412,8 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     await humanDelay(2000, 3000);
 
     // ── 4. Confirm Email (with captcha fallback) ─────────────────────────────
+    // If no confirmation email arrives, the flow assumes hCaptcha or similar
+    // friction blocked the signup and forces a cookie refresh retry.
     step(`Polling for confirmation email (${CONFIRM_EMAIL_TIMEOUT}s)...`);
     let confirmLink = null;
     try {
@@ -521,6 +544,8 @@ ok("Email confirmed.");
     burnInbox();
 
   } catch (err) {
+    // Any browser failure should leave a screenshot behind; debugging these
+    // flows without visual evidence is just self-harm with extra steps.
     fail(`Error: ${err.message}`);
     if (page) {
       try { await page.screenshot({ path: "/root/fail_hf_flow.png", fullPage: true }); } catch {}
@@ -535,6 +560,8 @@ ok("Email confirmed.");
 }
 
 async function main() {
+  // Two attempts is enough to cover the common "cookie refresh fixed it" path
+  // without turning this into an unbounded retry loop.
   const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
