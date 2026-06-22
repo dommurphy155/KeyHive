@@ -12,8 +12,11 @@ PROXY_URL="${KEYHIVE_PROXY_URL:-http://127.0.0.1:8787}"
 
 HF_KEYS_JS="$SCRIPTS_DIR/hf_keys.js"
 COUNT_KEYS_PY="$SCRIPTS_DIR/count_keys.py"
+RUN_STATS_PY="$SCRIPTS_DIR/run_stats.py"
 KEYS_FILE="$DATA_DIR/keys.txt"
 COOKIE_FILE="$DATA_DIR/hc_cookie.json"
+LOG_FILE="$ROOT_DIR/logs/keyhive-scanner.log"
+RUN_STATS_FILE="$DATA_DIR/run_stats.json"
 
 PYTHON_BIN="/usr/bin/python3"
 if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
@@ -126,6 +129,7 @@ start_service() {
     exit 1
   fi
 
+  "$PYTHON_BIN" "$RUN_STATS_PY" ensure >/dev/null
   systemctl start "$SERVICE"
   echo "✓ keyhive scanner started"
   systemctl status "$SERVICE" --no-pager -l | sed -n '1,12p'
@@ -147,6 +151,7 @@ restart_service() {
     exit 1
   fi
 
+  "$PYTHON_BIN" "$RUN_STATS_PY" reset-since-restart >/dev/null
   systemctl restart "$SERVICE"
   echo "✓ keyhive scanner restarted"
   systemctl status "$SERVICE" --no-pager -l | sed -n '1,12p'
@@ -200,6 +205,8 @@ show_status() {
   else
     printf "  %-16s missing: %s\n" "File:" "$COOKIE_FILE"
   fi
+
+  "$PYTHON_BIN" "$RUN_STATS_PY" status
 }
 
 show_logs() {
@@ -303,7 +310,21 @@ run_manual() {
   for i in $(seq 1 "$amount"); do
     echo
     echo "=== RUN $i/$amount ==="
-    "$NODE_BIN" "$HF_KEYS_JS"
+    tmp_log="$(mktemp)"
+    set +e
+    "$NODE_BIN" "$HF_KEYS_JS" 2>&1 | tee "$tmp_log"
+    run_code="${PIPESTATUS[0]}"
+    set -e
+    run_result="$("$PYTHON_BIN" "$RUN_STATS_PY" record "$run_code" "$tmp_log")"
+    rm -f "$tmp_log"
+    if [ "$run_result" = "success" ]; then
+      echo "=== manual run $i status: success ==="
+    else
+      echo "=== manual run $i status: failure ($run_result) ==="
+    fi
+    if [ "$run_code" -ne 0 ]; then
+      exit "$run_code"
+    fi
   done
 
   echo
@@ -317,7 +338,7 @@ show_tree() {
     exit 1
   fi
 
-  tree -a -I '.git|.venv|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|fail_*.png|chrome-*.log|*.log'
+  tree -a -I '.git|.env|.env.*|.venv|venv|env|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|.pair-programming-session.md|.plugin-config|.remember|logs|keys.txt|hc_cookie.json|run_stats.json|run_stats.lock|.agentmail_state.json|.last_key_count|fail_*.png|chrome-*.log|*.log'
 }
 
 doctor_ok() {

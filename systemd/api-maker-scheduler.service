@@ -10,7 +10,7 @@ WorkingDirectory=/root/api_maker
 Environment=HOME=/root
 Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=DISPLAY=:1
-ExecStart=/usr/bin/python3 /root/api_maker/scripts/scheduler.py
+ExecStart=/bin/bash -o pipefail -c 'mkdir -p /root/api_maker/logs && exec /usr/bin/python3 /root/api_maker/scripts/scheduler.py 2>&1 | /usr/bin/tee -a /root/api_maker/logs/keyhive-scanner.log'
 Restart=always
 RestartSec=10
 StandardOutput=journal

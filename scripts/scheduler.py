@@ -9,20 +9,38 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from run_stats import ensure_stats_file, record_run
+
+ROOT_DIR = Path("/root/api_maker")
 SCRIPT_DIR = Path("/root/api_maker/scripts")
 HF_KEYS_JS = SCRIPT_DIR / "hf_keys.js"
+LOG_DIR = ROOT_DIR / "logs"
 RUNS_PER_CYCLE = 10
 INTERVAL_SECONDS = 9 * 60  # 9 minutes
+
+
+def ensure_runtime_paths() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def fmt_dt(dt: datetime) -> str:
     return dt.strftime("%H:%M:%S %d/%m/%Y")
 
 
+def emit(message: str = "") -> None:
+    ensure_runtime_paths()
+    print(message, flush=True)
+
+
+def emit_raw(text: str) -> None:
+    ensure_runtime_paths()
+    print(text, end="", flush=True)
+
+
 def run_hf_keys(run_number: int) -> None:
     now = datetime.now()
     header = f"==={fmt_dt(now)}, run {run_number}==="
-    print(header, flush=True)
+    emit(header)
 
     proc = subprocess.Popen(
         ["node", str(HF_KEYS_JS)],
@@ -33,24 +51,33 @@ def run_hf_keys(run_number: int) -> None:
         bufsize=1,
     )
 
+    output_lines = []
     for line in proc.stdout:
-        print(line, end="", flush=True)
+        output_lines.append(line)
+        emit_raw(line)
 
-    proc.wait()
+    return_code = proc.wait()
+    output = "".join(output_lines)
+    failure_reason = record_run(output, return_code)
+    success = failure_reason is None
+
+    if success:
+        emit(f"===run {run_number} status: success===")
+    else:
+        emit(f"===run {run_number} status: failure ({failure_reason})===")
 
     if run_number < RUNS_PER_CYCLE:
-        print(f"===end of run {run_number}===\n", flush=True)
+        emit(f"===end of run {run_number}===\n")
     else:
         next_run = datetime.now() + timedelta(minutes=90)
-        print(
-            f"===End of run {run_number}. Next run at {fmt_dt(next_run)}===\n",
-            flush=True,
-        )
+        emit(f"===End of run {run_number}. Next run at {fmt_dt(next_run)}===\n")
 
 
 def main():
-    print(f"Scheduler started — {fmt_dt(datetime.now())}", flush=True)
-    print(f"Cycle: {RUNS_PER_CYCLE} runs × {INTERVAL_SECONDS // 60}min intervals\n", flush=True)
+    ensure_runtime_paths()
+    ensure_stats_file()
+    emit(f"Scheduler started - {fmt_dt(datetime.now())}")
+    emit(f"Cycle: {RUNS_PER_CYCLE} runs x {INTERVAL_SECONDS // 60}min intervals\n")
 
     while True:
         cycle_start = time.monotonic()
@@ -64,7 +91,7 @@ def main():
                 elapsed = time.monotonic() - run_start
                 sleep_for = max(0, INTERVAL_SECONDS - elapsed)
                 next_run_time = datetime.now() + timedelta(seconds=sleep_for)
-                print(f"Next run at {fmt_dt(next_run_time)}\n", flush=True)
+                emit(f"Next run at {fmt_dt(next_run_time)}\n")
                 time.sleep(sleep_for)
 
         # Wait out the remainder of the 90-min window before next cycle
@@ -72,7 +99,7 @@ def main():
         cycle_remainder = max(0, (90 * 60) - cycle_elapsed)
         if cycle_remainder > 0:
             next_cycle = datetime.now() + timedelta(seconds=cycle_remainder)
-            print(f"Cycle complete. Next cycle at {fmt_dt(next_cycle)}\n", flush=True)
+            emit(f"Cycle complete. Next cycle at {fmt_dt(next_cycle)}\n")
             time.sleep(cycle_remainder)
 
 
@@ -80,5 +107,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nScheduler stopped.", flush=True)
+        emit("\nScheduler stopped.")
         sys.exit(0)

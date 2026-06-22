@@ -30,6 +30,8 @@ KeyHive is the working name for this `api_maker` repo. It wires together a Bash 
 - Playwright-powered browser automation for Hugging Face account and token creation.
 - Persistent output in `data/keys.txt`.
 - Cookie cache at `data/hc_cookie.json`, refreshed when missing or stale.
+- Persistent scanner logs in `logs/keyhive-scanner.log`.
+- Run counters in `data/run_stats.json`, split into since-restart and all-time totals.
 - Python report script for counting saved keys and estimating rough token value.
 - Systemd unit included for long-running scheduler deployments.
 - Idempotent installer that preserves existing `.env` values and rewrites only the keys it owns.
@@ -41,8 +43,9 @@ KeyHive is the working name for this `api_maker` repo. It wires together a Bash 
 3. `hc_cookie_refresh.js` uses `GMAIL_ACCOUNTS` from `.env` to log into hCaptcha accessibility and save usable cookies.
 4. `scripts/burner_email.py` creates an AgentMail inbox using `AGENTMAIL_API_KEY`.
 5. The Playwright flow creates a Hugging Face account, confirms it through AgentMail, creates a write token, and appends the token to `data/keys.txt`.
-6. `scripts/scheduler.py` runs `hf_keys.js` 10 times per 90-minute cycle, every 9 minutes.
-7. `bin/keyhive` wraps the common commands so you do not have to remember script paths like some kind of cursed bash historian.
+6. `scripts/run_stats.py` records each completed run in `data/run_stats.json`.
+7. `scripts/scheduler.py` runs `hf_keys.js` 10 times per 90-minute cycle, every 9 minutes.
+8. `bin/keyhive` wraps the common commands so you do not have to remember script paths like some kind of cursed bash historian.
 
 ## Requirements
 
@@ -185,8 +188,8 @@ keyhive help
 | `keyhive runs 3` | Run `scripts/hf_keys.js` three times. |
 | `keyhive start` | Start the systemd scheduler service. |
 | `keyhive stop` | Stop the scheduler service. |
-| `keyhive restart` | Restart the scheduler service. |
-| `keyhive status` | Show service state, key count, and cookie age. |
+| `keyhive restart` | Restart the scheduler service and reset since-restart run counters. |
+| `keyhive status` | Show service state, key count, cookie age, since-restart counters, and all-time counters. |
 | `keyhive logs` | Show recent service logs. |
 | `keyhive logs -f` | Follow service logs. |
 | `keyhive logs 200` | Show the last 200 service log lines. |
@@ -217,6 +220,16 @@ Clean project structure:
 ```bash
 keyhive tree
 ```
+
+Runtime files are local-only and ignored by Git:
+
+| File | Purpose |
+| --- | --- |
+| `data/keys.txt` | Generated Hugging Face tokens. |
+| `data/hc_cookie.json` | Cached hCaptcha accessibility cookies. |
+| `data/run_stats.json` | Scanner run counters and failure buckets. |
+| `data/run_stats.lock` | File lock used for safe stats updates. |
+| `logs/keyhive-scanner.log` | Persistent copy of scanner systemd output. |
 
 Diagnostics:
 
@@ -373,7 +386,10 @@ api_maker/
 ├── data/
 │   ├── .gitkeep
 │   ├── hc_cookie.json        # runtime, ignored
-│   └── keys.txt              # runtime, ignored
+│   ├── keys.txt              # runtime, ignored
+│   └── run_stats.json        # runtime, ignored
+├── logs/
+│   └── keyhive-scanner.log   # runtime, ignored
 ├── proxy/
 │   ├── __init__.py
 │   ├── fallback/
@@ -389,14 +405,22 @@ api_maker/
 │   ├── count_keys.py
 │   ├── hc_cookie_refresh.js
 │   ├── hf_keys.js
+│   ├── run_stats.py
 │   ├── scheduler.py
 │   └── test_fallback_state.py
 ├── setup/
 │   ├── install.sh
+│   ├── installer.py
 │   └── requirements.txt
 ├── systemd/
 │   ├── api-maker-scheduler.service
 │   └── keyhive-proxy.service
+├── web_ui/
+│   ├── WEB_UI_PLAN.md
+│   ├── back_end/
+│   │   └── .gitkeep
+│   └── front_end/
+│       └── .gitkeep
 ├── .env                      # local secrets, ignored
 └── .gitignore
 ```

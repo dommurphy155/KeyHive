@@ -5,6 +5,7 @@
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -28,11 +29,14 @@ data/keys.txt
 data/hc_cookie.json
 data/.agentmail_state.json
 data/.last_key_count
+data/run_stats.json
+data/run_stats.lock
 keys.txt
 hc_cookie.json
 .last_key_count
 
 # Logs / dumps / screenshots
+logs/
 *.log
 scripts_dump_*.txt
 fail_*.png
@@ -54,22 +58,6 @@ hc_cookie_signup.js
 .pair-programming-session.md
 .plugin-config/
 .remember/
-
-# Python cache
-__pycache__/
-**/__pycache__/
-
-# Local test/temp clone paths
-tmp/
-
-# Local AI/editor/plugin state
-.pair-programming-session.md
-.plugin-config/
-.remember/
-
-# Python cache
-__pycache__/
-**/__pycache__/
 
 # Local test/temp clone paths
 tmp/
