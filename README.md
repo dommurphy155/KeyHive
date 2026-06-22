@@ -322,6 +322,20 @@ keyhive proxy logs -f
 
 ## Troubleshooting
 
+### Claude Code Shows Hugging Face `402 Payment Required`
+
+This means the active Hugging Face key has depleted its included monthly Inference Provider credits. KeyHive treats that key as exhausted, removes it from `data/keys.txt`, reloads the live pool, and uses NVIDIA fallback when no usable Hugging Face keys remain.
+
+Useful checks:
+
+```bash
+keyhive proxy fallback
+keyhive proxy stats
+keyhive proxy logs -f
+keyhive doctor
+keyhive tree
+```
+
 | Problem | Fix |
 | --- | --- |
 | `Missing AGENTMAIL_API_KEY in .env` | Re-run `./setup/install.sh` or add `AGENTMAIL_API_KEY=...` manually. |
@@ -362,6 +376,10 @@ api_maker/
 │   └── keys.txt              # runtime, ignored
 ├── proxy/
 │   ├── __init__.py
+│   ├── fallback/
+│   │   ├── __init__.py
+│   │   ├── manager.py
+│   │   └── nvidia_client.py
 │   ├── hf_client.py
 │   ├── key_store.py
 │   ├── keyhive_proxy.py
@@ -371,7 +389,8 @@ api_maker/
 │   ├── count_keys.py
 │   ├── hc_cookie_refresh.js
 │   ├── hf_keys.js
-│   └── scheduler.py
+│   ├── scheduler.py
+│   └── test_fallback_state.py
 ├── setup/
 │   ├── install.sh
 │   └── requirements.txt

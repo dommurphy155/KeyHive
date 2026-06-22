@@ -49,10 +49,9 @@ row() {
 }
 
 usage() {
-  cat << USAGE
-${BOLD}KEYHIVE${RESET}
-API key automation + local AI proxy control
-USAGE
+  printf "%sKEYHIVE%s\n" "$BOLD" "$RESET"
+  printf "API key automation + local AI proxy control\n"
+
   section "USAGE"
   row "keyhive [cmd]" "Run scanner, proxy, and reporting commands"
 
@@ -193,10 +192,11 @@ show_status() {
     age_sec="$((now - cookie_mtime))"
     age_min="$((age_sec / 60))"
     age_hr="$((age_min / 60))"
+    age_rem_min="$((age_min % 60))"
 
     printf "  %-16s %s\n" "File:" "$COOKIE_FILE"
     printf "  %-16s %s\n" "Modified:" "$(date -d "@$cookie_mtime" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || stat -c %y "$COOKIE_FILE")"
-    printf "  %-16s %sh %sm\n" "Age:" "$age_hr" "$age_min"
+    printf "  %-16s %sh %sm\n" "Age:" "$age_hr" "$age_rem_min"
   else
     printf "  %-16s missing: %s\n" "File:" "$COOKIE_FILE"
   fi
@@ -511,9 +511,22 @@ run_doctor() {
     available="$(printf "%s" "$stats_json" | json_field keys_available 2>/dev/null || true)"
     fallback="$(printf "%s" "$stats_json" | json_field fallback_enabled 2>/dev/null || true)"
     nvidia_available="$(printf "%s" "$stats_json" | json_field nvidia_available 2>/dev/null || true)"
+    provider="$(printf "%s" "$stats_json" | json_field current_provider 2>/dev/null || true)"
+    enter_at="$(printf "%s" "$stats_json" | json_field fallback_enter_at 2>/dev/null || true)"
+    exit_at="$(printf "%s" "$stats_json" | json_field fallback_exit_at 2>/dev/null || true)"
+    exhausted="$(printf "%s" "$stats_json" | json_field exhausted_keys_this_runtime 2>/dev/null || true)"
+    cooling="$(printf "%s" "$stats_json" | json_field keys_cooling_down 2>/dev/null || true)"
+    last_reload="$(printf "%s" "$stats_json" | json_field last_reload 2>/dev/null || true)"
     [ -n "$available" ] && doctor_ok "Proxy HF usable keys: $available"
     [ -n "$fallback" ] && doctor_ok "Fallback enabled: $fallback"
+    [ -n "$enter_at" ] && [ -n "$exit_at" ] && doctor_ok "Fallback config present: enter <= $enter_at, exit >= $exit_at"
+    [ -n "$exit_at" ] && doctor_ok "Fallback exit threshold: $exit_at"
     [ -n "$nvidia_available" ] && doctor_ok "NVIDIA fallback available: $nvidia_available"
+    [ -n "$provider" ] && doctor_ok "Proxy provider mode: $provider"
+    [ "$provider" = "nvidia" ] && { doctor_warn "Proxy is using NVIDIA fallback because HF usable keys are ${available:-0}"; warnings=$((warnings + 1)); }
+    [ -n "$exhausted" ] && doctor_ok "Exhausted HF keys removed this runtime: $exhausted"
+    [ -n "$cooling" ] && doctor_ok "Rate-limited HF keys cooling down: $cooling"
+    [ -n "$last_reload" ] && doctor_ok "Last key reload: $last_reload"
   else
     doctor_warn "Proxy stats unreachable: $PROXY_URL/stats"
     warnings=$((warnings + 1))
@@ -610,7 +623,36 @@ proxy_status() {
 
 proxy_stats() {
   section "KEYHIVE PROXY STATS"
-  curl_json "$PROXY_URL/stats"
+  body="$(curl -fsS "$PROXY_URL/stats" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    echo "✗ Request failed: $PROXY_URL/stats" >&2
+    exit 1
+  fi
+
+  "$PYTHON_BIN" - "$body" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+provider = data.get("current_provider", "unknown")
+hf_keys = data.get("hf_usable_keys", data.get("keys_available", 0))
+fallback = data.get("fallback_enabled", False)
+nvidia = data.get("nvidia_available", False)
+
+print(f"  {'Current provider:':<30} {provider}")
+print(f"  {'HF usable keys:':<30} {hf_keys}")
+print(f"  {'Fallback:':<30} {'enabled' if fallback else 'disabled'}")
+print(f"  {'Fallback enter threshold:':<30} <= {data.get('fallback_enter_at', 0)}")
+print(f"  {'Fallback exit threshold:':<30} >= {data.get('fallback_exit_at', 10)}")
+print(f"  {'NVIDIA available:':<30} {str(nvidia).lower()}")
+print(f"  {'NVIDIA model:':<30} {data.get('nvidia_model', 'unknown')}")
+print(f"  {'Last key reload:':<30} {data.get('last_reload') or 'unknown'}")
+print(f"  {'keys.txt mtime:':<30} {data.get('keys_file_mtime') or 'unknown'}")
+print(f"  {'Exhausted removed runtime:':<30} {data.get('exhausted_keys_this_runtime', 0)}")
+print(f"  {'Disabled removed runtime:':<30} {data.get('disabled_keys_this_runtime', 0)}")
+print(f"  {'Cooling down:':<30} {data.get('keys_cooling_down', 0)}")
+print(f"  {'Active requests:':<30} {data.get('active_requests', 0)}")
+PY
 }
 
 proxy_fallback() {
@@ -638,6 +680,11 @@ enter_at = data.get("fallback_enter_at", 0)
 exit_at = data.get("fallback_exit_at", 10)
 model = data.get("nvidia_model", "unknown")
 reason = data.get("fallback_reason")
+last_reload = data.get("last_reload") or "unknown"
+keys_mtime = data.get("keys_file_mtime") or "unknown"
+exhausted = data.get("exhausted_keys_this_runtime", 0)
+disabled = data.get("disabled_keys_this_runtime", 0)
+cooling = data.get("keys_cooling_down", 0)
 
 print("KEYHIVE FALLBACK")
 if provider == "nvidia":
@@ -653,6 +700,12 @@ else:
     print(f"Enter fallback:   <= {enter_at} keys")
     print(f"Exit fallback:    >= {exit_at} keys")
     print(f"NVIDIA model:     {model}")
+print(f"NVIDIA:           {'available' if nvidia else 'unavailable'}")
+print(f"Last key reload:  {last_reload}")
+print(f"keys.txt mtime:   {keys_mtime}")
+print(f"Exhausted removed:{exhausted}")
+print(f"Disabled removed: {disabled}")
+print(f"Cooling down:     {cooling}")
 PY
 }
 

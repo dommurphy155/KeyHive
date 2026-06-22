@@ -63,10 +63,19 @@ class KeyStore:
         self._last_reload: str | None = None
         self._next_index = 0
         self._lock = asyncio.Lock()
+        self._exhausted_runtime = 0
+        self._disabled_runtime = 0
 
     @property
     def last_reload(self) -> str | None:
         return self._last_reload
+
+    @property
+    def keys_mtime(self) -> str | None:
+        try:
+            return datetime.fromtimestamp(self.keys_file.stat().st_mtime, timezone.utc).isoformat()
+        except FileNotFoundError:
+            return None
 
     async def load(self, force: bool = False) -> None:
         async with self._lock:
@@ -145,15 +154,28 @@ class KeyStore:
             self._advance_from(state)
 
     async def invalidate_key(self, state: KeyState, reason: str) -> None:
+        await self.remove_key(state, reason=reason, exhausted=False)
+
+    async def exhaust_key(self, state: KeyState, reason: str = "credits exhausted") -> None:
+        await self.remove_key(state, reason=reason, exhausted=True)
+
+    async def remove_key(self, state: KeyState, reason: str, exhausted: bool) -> None:
         async with self._lock:
             state.failed_requests += 1
             state.disabled_reason = reason
+            if exhausted:
+                self._exhausted_runtime += 1
+            else:
+                self._disabled_runtime += 1
             self._advance_from(state)
-            active_tokens = [
-                key.token for key in self._keys if key.disabled_reason is None
-            ]
+            remove_token = state.token
+            active_tokens = [key.token for key in self._keys if key.token != remove_token]
             self._atomic_write_tokens(active_tokens)
+            self._keys = [key for key in self._keys if key.token != remove_token]
             self._mtime = self.keys_file.stat().st_mtime
+            self._last_reload = utc_now_iso()
+            if self._next_index >= len(self._keys):
+                self._next_index = 0
 
     def _advance_from(self, state: KeyState) -> None:
         for idx, key in enumerate(self._keys):
@@ -181,11 +203,19 @@ class KeyStore:
                 os.unlink(tmp_name)
 
     def stats(self) -> dict[str, int]:
+        keys_total = len(self._keys)
+        keys_available = sum(1 for key in self._keys if key.available)
+        keys_cooling_down = sum(1 for key in self._keys if key.cooling_down)
+        keys_disabled = sum(1 for key in self._keys if key.disabled_reason)
         return {
+            "total_keys": keys_total,
+            "usable_keys": keys_available,
             "keys_total": len(self._keys),
-            "keys_available": sum(1 for key in self._keys if key.available),
-            "keys_cooling_down": sum(1 for key in self._keys if key.cooling_down),
-            "keys_disabled": sum(1 for key in self._keys if key.disabled_reason),
+            "keys_available": keys_available,
+            "keys_cooling_down": keys_cooling_down,
+            "keys_disabled": keys_disabled,
+            "exhausted_keys_this_runtime": self._exhausted_runtime,
+            "disabled_keys_this_runtime": self._disabled_runtime,
         }
 
     def key_stats(self) -> list[dict[str, Any]]:

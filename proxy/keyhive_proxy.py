@@ -41,9 +41,10 @@ DEFAULT_MODEL = os.getenv("KEYHIVE_PROXY_DEFAULT_MODEL", "zai-org/GLM-5.2")
 NVIDIA_MODEL = os.getenv("KEYHIVE_PROXY_NVIDIA_MODEL", "moonshotai/kimi-k2.6")
 NVIDIA_BASE_URL = os.getenv("KEYHIVE_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/chat/completions")
 NVDA_KEY = os.getenv("NVDA_KEY", "")
-RELOAD_SECONDS = int(os.getenv("KEYHIVE_PROXY_RELOAD_SECONDS", "10"))
+RELOAD_SECONDS = int(os.getenv("KEYHIVE_PROXY_RELOAD_SECONDS", "5"))
 REQUEST_TIMEOUT = float(os.getenv("KEYHIVE_PROXY_REQUEST_TIMEOUT", "300"))
 MAX_RETRIES = int(os.getenv("KEYHIVE_PROXY_MAX_RETRIES", "2"))
+MAX_KEY_FAILOVERS = int(os.getenv("KEYHIVE_PROXY_MAX_KEY_FAILOVERS", "3"))
 DEBUG = os.getenv("KEYHIVE_PROXY_DEBUG", "0") == "1"
 MAX_BODY_BYTES = 2 * 1024 * 1024
 
@@ -199,6 +200,7 @@ async def stats() -> dict[str, Any]:
         "default_model": DEFAULT_MODEL,
         "keys_file": KEYS_FILE,
         "last_reload": key_store.last_reload,
+        "keys_file_mtime": key_store.keys_mtime,
         **fallback,
     }
 
@@ -322,15 +324,21 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
     attempts = max(1, key_store.stats()["keys_total"] + MAX_RETRIES)
     last_status = 503
     last_message = "no usable keys are available"
-    rate_limit_failovers = 0
+    key_failovers = 0
     server_retries = 0
 
     for _ in range(attempts):
+        if key_failovers >= MAX_KEY_FAILOVERS:
+            return json_error(
+                "KeyHive exhausted the per-request key failover limit. Retry request.",
+                "key_failover_limit",
+                503,
+            )
         state_or_error = await choose_key_or_503()
         if isinstance(state_or_error, JSONResponse):
             if refresh_provider_mode() == "nvidia":
                 return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
-            return state_or_error
+            return no_provider_error()
         state = state_or_error
 
         try:
@@ -352,6 +360,18 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
         last_status = response.status_code
         last_message = upstream_error_text(response)
 
+        if response.status_code == 402:
+            logger.warning(
+                "[PROXY] HF key exhausted: %s — removing from active pool and keys.txt",
+                state.fingerprint,
+            )
+            await key_store.exhaust_key(state, "credits exhausted")
+            refresh_provider_mode()
+            key_failovers += 1
+            if refresh_provider_mode() == "nvidia":
+                return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
+            continue
+
         if (
             response.status_code == 400
             and upstream_error_code(response) in {"model_not_found", "model_not_supported"}
@@ -361,9 +381,13 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
             return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
         if response.status_code == 429:
-            if rate_limit_failovers >= 1:
-                break
-            rate_limit_failovers += 1
+            retry_after = retry_after_seconds(response.headers)
+            logger.warning(
+                "[PROXY] HF key rate limited: %s — cooldown %ss",
+                state.fingerprint,
+                retry_after,
+            )
+            key_failovers += 1
             continue
 
         if response.status_code in {500, 502, 503, 504}:
@@ -372,11 +396,21 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
             server_retries += 1
             continue
 
+        if response.status_code in {401, 403}:
+            logger.warning("[PROXY] HF key invalid/forbidden: %s — removed", state.fingerprint)
+            refresh_provider_mode()
+            key_failovers += 1
+            if refresh_provider_mode() == "nvidia":
+                return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
+            continue
+
         if response.status_code not in {401, 403}:
             break
 
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
+    if last_status == 402:
+        return no_provider_error()
     return json_error(last_message, "upstream_error", last_status)
 
 
@@ -385,15 +419,17 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
         return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
     attempts = max(1, key_store.stats()["keys_total"] + MAX_RETRIES)
-    rate_limit_failovers = 0
+    key_failovers = 0
     server_retries = 0
 
     for _ in range(attempts):
+        if key_failovers >= MAX_KEY_FAILOVERS:
+            return stream_error(model, "KeyHive exhausted the per-request key failover limit. Retry request.", 503)
         state_or_error = await choose_key_or_503()
         if isinstance(state_or_error, JSONResponse):
             if refresh_provider_mode() == "nvidia":
                 return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
-            return state_or_error
+            return stream_error(model, "No usable provider available. Hugging Face keys exhausted and NVIDIA fallback unavailable.", 503)
         state = state_or_error
 
         try:
@@ -414,10 +450,26 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
             )
 
         await mark_status(state, status, headers)
+        if status == 402:
+            logger.warning(
+                "[PROXY] HF key exhausted: %s — removing from active pool and keys.txt",
+                state.fingerprint,
+            )
+            await key_store.exhaust_key(state, "credits exhausted")
+            refresh_provider_mode()
+            key_failovers += 1
+            if refresh_provider_mode() == "nvidia":
+                return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
+            continue
+
         if status == 429:
-            if rate_limit_failovers >= 1:
-                return stream_error(model, "upstream rate limited all usable failover keys", 429)
-            rate_limit_failovers += 1
+            retry_after = retry_after_seconds(headers)
+            logger.warning(
+                "[PROXY] HF key rate limited: %s — cooldown %ss",
+                state.fingerprint,
+                retry_after,
+            )
+            key_failovers += 1
             continue
 
         if status in {500, 502, 503, 504}:
@@ -426,12 +478,33 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
             server_retries += 1
             continue
 
+        if status in {401, 403}:
+            logger.warning("[PROXY] HF key invalid/forbidden: %s — removed", state.fingerprint)
+            refresh_provider_mode()
+            key_failovers += 1
+            if refresh_provider_mode() == "nvidia":
+                return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
+            continue
+
         if status not in {401, 403}:
             return stream_error(model, f"upstream returned {status}", status)
 
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
     return stream_error(model, "no usable keys are available", 503)
+
+
+def no_provider_error() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "message": "No usable provider available. Hugging Face keys exhausted and NVIDIA fallback unavailable.",
+                "type": "keyhive_no_provider",
+                "code": "no_provider",
+            }
+        },
+        status_code=503,
+    )
 
 
 async def handle_nvidia_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse:

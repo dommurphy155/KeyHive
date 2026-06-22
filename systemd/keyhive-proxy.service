@@ -22,7 +22,8 @@ Environment=KEYHIVE_HF_BASE_URL=https://router.huggingface.co/v1
 Environment=KEYHIVE_NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1/chat/completions
 Environment=KEYHIVE_PROXY_DEFAULT_MODEL=zai-org/GLM-5.2
 Environment=KEYHIVE_PROXY_NVIDIA_MODEL=moonshotai/kimi-k2.6
-Environment=KEYHIVE_PROXY_RELOAD_SECONDS=10
+Environment=KEYHIVE_PROXY_RELOAD_SECONDS=5
+Environment=KEYHIVE_PROXY_MAX_KEY_FAILOVERS=3
 Environment=KEYHIVE_PROXY_REQUEST_TIMEOUT=300
 Environment=KEYHIVE_PROXY_MAX_RETRIES=2
 Environment=KEYHIVE_PROXY_DEBUG=0

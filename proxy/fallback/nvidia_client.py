@@ -23,7 +23,7 @@ class NvidiaClient:
 
     @property
     def available(self) -> bool:
-        return bool(self.api_key)
+        return self.api_key.startswith("nvapi-")
 
     async def close(self) -> None:
         await self._client.aclose()

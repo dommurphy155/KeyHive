@@ -39,9 +39,9 @@ class FallbackManager:
 
         if not nvidia_available:
             if not self._nvidia_missing_logged:
-                self.logger.warning("NVIDIA fallback unavailable because NVDA_KEY is missing.")
+                self.logger.warning("[PROXY] NVIDIA fallback unavailable: NVDA_KEY missing or invalid")
                 self._nvidia_missing_logged = True
-            self._set_provider("hf", "NVIDIA fallback unavailable because NVDA_KEY is missing", hf_usable_keys)
+            self._set_provider("hf", "NVIDIA fallback unavailable: NVDA_KEY missing or invalid", hf_usable_keys)
             return self._provider
 
         if self._provider == "nvidia":

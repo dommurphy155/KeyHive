@@ -295,6 +295,8 @@ def configure_proxy_env_defaults() -> None:
         "KEYHIVE_KEYS_FILE": str(DATA_DIR / "keys.txt"),
         "KEYHIVE_PROXY_DEFAULT_PROVIDER": "hf",
         "KEYHIVE_PROXY_FALLBACK_PROVIDER": "nvidia",
+        "KEYHIVE_PROXY_RELOAD_SECONDS": "5",
+        "KEYHIVE_PROXY_MAX_KEY_FAILOVERS": "3",
         "KEYHIVE_FALLBACK_ENABLED": "1",
         "KEYHIVE_FALLBACK_PROVIDER": "nvidia",
         "KEYHIVE_FALLBACK_ENTER_AT": "0",
