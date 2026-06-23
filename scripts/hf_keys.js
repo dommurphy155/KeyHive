@@ -4,8 +4,14 @@
 // token, and appends it to data/keys.txt.
 "use strict";
 
-const { chromium } = require("playwright");
-const { spawn, execSync } = require("child_process");
+// Patchright is a drop-in fork of Playwright that fixes the protocol-level
+// detection leaks raw Playwright leaves open — most importantly the
+// Runtime.enable / Console.enable CDP calls that Cloudflare, DataDome and
+// hCaptcha fingerprint to spot automation. It also strips the automation
+// launch flags (--enable-automation, --disable-extensions, etc.) for us.
+// Same API as playwright, so the rest of the file is unchanged.
+const { chromium } = require("patchright");
+const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -30,12 +36,11 @@ const HF_SIGNUP_URL = "https://huggingface.co/join";
 const HCAPTCHA_FRAME_RE = /(^|:\/\/)([^/]+\.)?hcaptcha\.com/i;
 const CAPTCHA_BODY_RE = /(select all|verify you are human|i'?m human|challenge|captcha|puzzle)/i;
 
-// Chrome runs with a separate CDP port and profile so the signup flow can be
-// observed and cleaned up without disturbing the browser-strength profiles.
-const CDP_PORT  = 9334;
-const CDP_HOST  = "127.0.0.1";
+// Chrome runs with a throwaway profile dir so the signup flow can be observed
+// and cleaned up without disturbing the browser-strength profiles. Patchright
+// talks to Chrome over a protocol pipe (not a network CDP port), so there's no
+// remote-debugging-port to manage here — launchPersistentContext handles it.
 const X_DISPLAY = ":1";
-const CHROME_LOG = "/root/chrome-9334.log";
 const CONFIRM_EMAIL_TIMEOUT = 20;
 const COOKIE_PRIME_TIMEOUT = 12000;
 
@@ -431,100 +436,55 @@ async function verifyHcCookies(context, cookies, tabs = []) {
   ok(`Cookies verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
 }
 
-// ─── Port + profile utils ──────────────────────────────────────────────────
-function killPort(port) {
-  try { execSync(`fuser -k ${port}/tcp 2>/dev/null || true`); } catch {}
-}
-
+// ─── Profile utils ─────────────────────────────────────────────────────────
 function cleanupProfile(dir) {
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 
-// ─── Spawn Chrome ──────────────────────────────────────────────────────────
-function launchChrome(profileDir) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "google-chrome-stable",
-      [
-        `--remote-debugging-port=${CDP_PORT}`,
-        `--remote-debugging-address=${CDP_HOST}`,
-        `--user-data-dir=${profileDir}`,
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-        // This is a visible browser, not a headless science project. Every flag
-        // below was verified against THIS box (Ubuntu 24.04 / Chrome 146 / no GPU
-        // passthrough / TigerVNC :1) so the fingerprint matches a real human on a
-        // GPU-less Linux VPS rather than a Windows-impersonating bot.
-        //
-        //   navigator.userAgent   -> Chrome/146 X11; Linux x86_64  (genuine binary)
-        //   navigator.platform    -> Linux x86_64                  (matches UA)
-        //   navigator.webdriver   -> false
-        //   navigator.language    -> en-GB  (needs --accept-lang; --lang alone is ignored)
-        //   Intl timezone         -> Europe/London  (host tz, unspoofed)
-        //   screen                -> real TigerVNC geometry, not a fake 1920x1080
-        //   WebGL                 -> WORKS: ANGLE (Mesa, llvmpipe, OpenGL 4.5)
-        //
-        // The old flags (--use-gl=swiftshader --use-angle=swiftshader-webgl) returned
-        // a NULL WebGL context on this display — a louder bot signal than any renderer
-        // string, and the SwiftShader "0x0000C0DE" device string is the classic
-        // headless tell. llvmpipe is Mesa's stock software rasterizer; it's exactly
-        // what a real GPU-less Linux user shows.
-        "--disable-blink-features=AutomationControlled",
-        "--ignore-gpu-blocklist",
-        "--enable-unsafe-swiftshader",
-        "--lang=en-GB",
-        "--accept-lang=en-GB,en",
-        // No --user-agent override: the installed Chrome 146 already emits the
-        // correct Linux UA, and faking Windows here leaves navigator.platform as
-        // "Linux x86_64" — UA/platform mismatch is a textbook automation tell.
-        // No --window-size: let Chrome use the real TigerVNC display geometry
-        // (820x1048 here) instead of lying about a 1080p desktop that isn't there.
-      ],
-      {
-        env:      { ...process.env, DISPLAY: X_DISPLAY },
-        detached: false,
-        stdio:    ["ignore", "pipe", "pipe"],
-      }
-    );
+// ─── Launch Chrome (patchright persistent context) ─────────────────────────
+// Patchright launches real Google Chrome (channel:"chrome") over its own
+// protocol pipe — NOT a manual spawn + connectOverCDP — so the Runtime.enable
+// / Console.enable CDP leaks that anti-bot systems fingerprint are patched at
+// the driver layer. We get back a BrowserContext directly; no separate `browser`
+// object, no CDP port to poll, no child process to SIGTERM.
+async function launchChrome(profileDir) {
+  // DISPLAY must reach the Chrome process; patchright inherits process.env, so
+  // set it before launch rather than passing it through (there is no env: hook
+  // on launchPersistentContext).
+  process.env.DISPLAY = X_DISPLAY;
 
-    const logStream = fs.createWriteStream(CHROME_LOG, { flags: "a" });
-    child.stdout.pipe(logStream);
-    child.stderr.pipe(logStream);
+  const context = await chromium.launchPersistentContext(profileDir, {
+    channel: "chrome",
+    headless: false,
+    viewport: null, // use the real TigerVNC display geometry, don't fake a desktop
 
-    child.on("error", (err) => reject(new Error(`Chrome spawn failed: ${err.message}`)));
-    child.on("exit",  (code, sig) => dbg(`Chrome exited (code=${code} sig=${sig})`));
+    // Fingerprint flags, all verified against THIS box (Ubuntu 24.04 / Chrome
+    // 146 / no GPU passthrough / TigerVNC :1). Goal: every navigator property
+    // agrees, so the profile reads as a coherent real-human Linux user — not a
+    // Windows-impersonating bot with Linux fingerprints leaking underneath.
+    args: [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      // WebGL: without these the TigerVNC display has no GLX and Chrome returns
+      // a NULL WebGL context — a louder bot signal than any renderer string.
+      // --enable-unsafe-swiftshader gives a working context backed by Mesa's
+      // llvmpipe, which is exactly what a real GPU-less Linux user shows (NOT the
+      // SwiftShader "0x0000C0DE" headless device string).
+      "--ignore-gpu-blocklist",
+      "--enable-unsafe-swiftshader",
+      // --accept-lang is what actually sets navigator.language; --lang alone is
+      // silently ignored by Chrome and the profile locale wins.
+      "--lang=en-GB",
+      "--accept-lang=en-GB,en",
+    ],
 
-    let done = false;
-    const deadline = Date.now() + 15000;
-
-    // The flow waits for /json/version so Playwright only attaches after Chrome
-    // is actually ready instead of guessing and dying on startup races.
-    const poll = setInterval(async () => {
-      if (done) return;
-      try {
-        const res = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/version`);
-        if (res.ok) {
-          done = true;
-          clearInterval(poll);
-          resolve(child);
-        }
-      } catch {
-        if (Date.now() > deadline) {
-          done = true;
-          clearInterval(poll);
-          reject(new Error("CDP never came alive within 15s"));
-        }
-      }
-    }, 300);
+    // Do NOT set userAgent / locale / timezoneId / extraHTTPHeaders here.
+    // Patchright's own guidance: overriding these creates detectable mismatches
+    // against the real binary's client hints and the host tz. The genuine
+    // Chrome 146 UA + Europe/London host tz + en-GB accept-lang already agree.
   });
-}
 
-function killChrome(child) {
-  if (!child || child.killed) return;
-  try { child.kill("SIGTERM"); } catch { try { child.kill("SIGKILL"); } catch {} }
+  return context;
 }
 
 // ─── Main Flow ────────────────────────────────────────────────────────────
@@ -538,19 +498,13 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
   const fullname = generateFullName();
 
   const profileDir  = `/tmp/chrome-hf-keys-${process.pid}`;
-  let chromeProcess = null;
-  let browser       = null;
+  let context       = null; // patchright persistent context — also IS the browser
   let page          = null;
 
   try {
     step("Starting Chrome...");
-    killPort(CDP_PORT);
-    chromeProcess = await launchChrome(profileDir);
+    context = await launchChrome(profileDir);
     ok("Chrome ready");
-
-    step("Connecting via CDP...");
-    browser = await chromium.connectOverCDP(`http://${CDP_HOST}:${CDP_PORT}`);
-    const context = browser.contexts()[0] ?? (await browser.newContext());
 
     await injectHcCookiesWithPriming(context, cookies, "fresh burner profile");
 
@@ -640,8 +594,7 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
         warn("The hCaptcha iframe cannot read the accessibility cookie from this context.");
       }
 
-      await browser.close().catch(() => {});
-      killChrome(chromeProcess);
+      await context.close().catch(() => {});
       cleanupProfile(profileDir);
       burnInbox();
       return "CAPTCHA_BLOCKED";
@@ -662,8 +615,7 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
 
     if (!confirmLink) {
       warn(`No confirmation email in ${CONFIRM_EMAIL_TIMEOUT}s — likely hCaptcha.`);
-      await browser.close();
-      killChrome(chromeProcess);
+      await context.close();
       cleanupProfile(profileDir);
       burnInbox();
 
@@ -791,8 +743,7 @@ ok("Email confirmed.");
     }
     process.exit(1);
   } finally {
-    if (browser) { try { await browser.close(); } catch {} }
-    killChrome(chromeProcess);
+    if (context) { try { await context.close(); } catch {} }
     cleanupProfile(profileDir);
   }
 }
