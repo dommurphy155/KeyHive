@@ -216,7 +216,7 @@ keyhive help
 | `keyhive web status` | Show Web UI service status and `/api/status`. |
 | `keyhive web logs` | Show recent Web UI service logs. |
 | `keyhive doctor` | Run diagnostics for env, deps, services, proxy, and Claude config. |
-| `keyhive tree` | Show a clean project tree without install/runtime noise. |
+| `keyhive tree` | Show the stripped-down repo layout. |
 
 Direct script commands:
 
@@ -227,12 +227,6 @@ node scripts/hf_keys.js
 .venv/bin/python scripts/burner_email.py check
 .venv/bin/python scripts/burner_email.py burn
 .venv/bin/python scripts/count_keys.py
-```
-
-Clean project structure:
-
-```bash
-keyhive tree
 ```
 
 Runtime files are local-only and ignored by Git:
@@ -249,6 +243,7 @@ Diagnostics:
 
 ```bash
 keyhive doctor
+keyhive tree
 ```
 
 ## KeyHive Proxy
@@ -408,7 +403,6 @@ keyhive proxy fallback
 keyhive proxy stats
 keyhive proxy logs -f
 keyhive doctor
-keyhive tree
 ```
 
 | Problem | Fix |

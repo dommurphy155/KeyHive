@@ -97,7 +97,7 @@ usage() {
 
   section "OTHER"
   row "doctor" "Run local diagnostics"
-  row "tree" "Show a clean project tree"
+  row "tree" "Show the stripped-down repo layout"
   row "help" "Show this help"
 
   section "SERVICES"
@@ -385,16 +385,6 @@ run_manual() {
   echo "✓ Manual run complete"
 }
 
-show_tree() {
-  cd "$ROOT_DIR"
-  if ! command -v tree >/dev/null 2>&1; then
-    echo "✗ tree not found" >&2
-    exit 1
-  fi
-
-  tree -a -I '.git|.agents|.codex|.env|.env.*|.venv|venv|env|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|.pair-programming-session.md|.plugin-config|.remember|logs|keys.txt|hc_cookie.json|run_stats.json|run_stats.lock|.agentmail_state.json|.last_key_count|fail_*.png|chrome-*.log|*.log'
-}
-
 doctor_ok() {
   printf "  %s✓%s %s\n" "$GREEN" "$RESET" "$1"
 }
@@ -628,6 +618,16 @@ run_doctor() {
   section "SUMMARY"
   printf "  Warnings: %s\n" "$warnings"
   printf "  Failures: %s\n" "$failures"
+}
+
+show_tree() {
+  cd "$ROOT_DIR"
+  if ! command -v tree >/dev/null 2>&1; then
+    echo "✗ tree not found" >&2
+    exit 1
+  fi
+
+  tree -a -I '.git|.agents|.codex|.env|.env.*|.venv|venv|env|node_modules|__pycache__|.pytest_cache|.mypy_cache|.ruff_cache|.cache|dist|build|*.egg-info|logs|data|profiles|.pair-programming-session.md|.plugin-config|.remember|*.log|fail_*.png|chrome-*.log'
 }
 
 proxy_start() {

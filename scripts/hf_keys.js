@@ -25,6 +25,10 @@ const HCAPTCHA_COOKIE_URLS = [
   "https://accounts.hcaptcha.com",
   "https://api.hcaptcha.com",
 ];
+const CAPTCHA_BLOCK_EXIT_CODE = 2;
+const HF_SIGNUP_URL = "https://huggingface.co/join";
+const HCAPTCHA_FRAME_RE = /(^|:\/\/)([^/]+\.)?hcaptcha\.com/i;
+const CAPTCHA_BODY_RE = /(select all|verify you are human|i'?m human|challenge|captcha|puzzle)/i;
 
 // Chrome runs with a separate CDP port and profile so the signup flow can be
 // observed and cleaned up without disturbing the browser-strength profiles.
@@ -173,13 +177,103 @@ function burnInbox() {
   }
 }
 
+function isRetryableRunError(message) {
+  const text = String(message || "").toLowerCase();
+  return [
+    "hcaptcha accessibility cookie injection failed",
+    "hcaptcha cookie injection verification failed",
+    "could not extract hf token",
+  ].some((needle) => text.includes(needle));
+}
+
 // ─── Cookie injection ─────────────────────────────────────────────────────
 function normalizeSameSite(value) {
   return ["Strict", "Lax", "None"].includes(value) ? value : "Lax";
 }
 
+function partitionKeyValue(cookie) {
+  if (!cookie || !cookie.partitionKey) return "";
+  if (typeof cookie.partitionKey === "string") return cookie.partitionKey;
+  if (cookie.partitionKey.topLevelSite) return cookie.partitionKey.topLevelSite;
+  return JSON.stringify(cookie.partitionKey);
+}
+
 function cookieKey(cookie) {
-  return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}`;
+  return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}|${partitionKeyValue(cookie)}`;
+}
+
+function formatCookie(cookie) {
+  const parts = [
+    `${cookie.name}@${cookie.domain}${cookie.path || "/"}`,
+    `sameSite=${cookie.sameSite || "?"}`,
+    `secure=${Boolean(cookie.secure)}`,
+    `httpOnly=${Boolean(cookie.httpOnly)}`,
+  ];
+  const partition = partitionKeyValue(cookie);
+  if (partition) parts.push(`partitionKey=${partition}`);
+  return parts.join(" ");
+}
+
+function normalizeCookieValue(value) {
+  if (!value) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+async function collectFrameCookieEvidence(frame) {
+  const url = frame.url();
+  let cookieText = "";
+  let bodyText = "";
+
+  try {
+    cookieText = await frame.evaluate(() => document.cookie);
+  } catch (err) {
+    cookieText = `[[unavailable: ${err.message}]]`;
+  }
+
+  try {
+    bodyText = await frame.evaluate(() => document.body?.innerText || document.documentElement?.innerText || "");
+  } catch (err) {
+    bodyText = `[[unavailable: ${err.message}]]`;
+  }
+
+  return {
+    url,
+    cookieText: normalizeCookieValue(cookieText),
+    bodyText: normalizeCookieValue(bodyText),
+  };
+}
+
+async function logHcaptchaDiagnostics(context, page, label) {
+  warn(`hCaptcha diagnostics (${label})`);
+  warn(`Top-level URL: ${page.url()}`);
+
+  const cookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
+  if (!cookies.length) {
+    warn("No hCaptcha-domain cookies visible in the context");
+  } else {
+    for (const cookie of cookies) warn(`Cookie: ${formatCookie(cookie)}`);
+  }
+
+  const frames = page.frames().filter((frame) => HCAPTCHA_FRAME_RE.test(frame.url()));
+  if (!frames.length) {
+    warn("No hCaptcha iframe/frame URLs found on the page");
+    return { challengeVisible: false, iframeCookieVisible: false };
+  }
+
+  let iframeCookieVisible = false;
+  let challengeVisible = false;
+
+  for (const frame of frames) {
+    const evidence = await collectFrameCookieEvidence(frame);
+    if (/hc_(?:accessibility|at)=/i.test(evidence.cookieText)) iframeCookieVisible = true;
+    if (CAPTCHA_BODY_RE.test(evidence.bodyText) || CAPTCHA_BODY_RE.test(evidence.url)) challengeVisible = true;
+
+    warn(`Frame: ${evidence.url}`);
+    warn(`  document.cookie: ${evidence.cookieText || "[empty]"}`);
+    if (evidence.bodyText) warn(`  body text: ${evidence.bodyText.slice(0, 300)}`);
+  }
+
+  return { challengeVisible, iframeCookieVisible };
 }
 
 function toPlaywrightCookie(cookie) {
@@ -210,19 +304,26 @@ function toPlaywrightCookie(cookie) {
 }
 
 async function injectHcCookies(context, cookies) {
-  // Playwright can accept malformed cookie objects and then quietly do the
-  // wrong thing, so verify the cookies are actually visible after injection.
+  // Inject the full hCaptcha cookie jar, then verify every cookie we saved is
+  // visible in the Playwright context. This keeps the browser session aligned
+  // with the exact cookie state produced by hc_cookie_refresh.js.
   const normalized = cookies.map(toPlaywrightCookie);
   await context.addCookies(normalized);
 
-  const expected = new Set(normalized.map(cookieKey));
-  const actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
-  const actual = new Set(actualCookies.map(cookieKey));
-  const missing = [...expected].filter((key) => !actual.has(key));
+  let actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
+  let actual = new Set(actualCookies.map(cookieKey));
+  let missing = normalized.filter((cookie) => !actual.has(cookieKey(cookie)));
 
   if (missing.length > 0) {
-    warn(`Missing hCaptcha cookie(s) after injection: ${missing.join(", ")}`);
-    throw new Error("hCaptcha cookie injection verification failed");
+    await sleep(1500);
+    actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
+    actual = new Set(actualCookies.map(cookieKey));
+    missing = normalized.filter((cookie) => !actual.has(cookieKey(cookie)));
+
+    if (missing.length > 0) {
+      warn(`Missing hCaptcha cookie(s) after injection: ${missing.map(cookieKey).join(", ")}`);
+      throw new Error("hCaptcha cookie injection verification failed");
+    }
   }
 
   ok(`Cookie verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
@@ -339,7 +440,7 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
 
     // ── 3. Register on HF ──────────────────────────────────────────────────
     step("Navigating to Hugging Face join page...");
-    await page.goto("https://huggingface.co/join", { waitUntil: "networkidle" });
+    await page.goto(HF_SIGNUP_URL, { waitUntil: "networkidle" });
 
     step("Filling email...");
     await page.locator('input[name="email"][type="email"]').type(email, { delay: 100 });
@@ -410,6 +511,22 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     step("Create Account clicked — waiting for response...");
     await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     await humanDelay(2000, 3000);
+
+    const hcaptchaDiag = await logHcaptchaDiagnostics(context, page, "after Create Account");
+    if (hcaptchaDiag.challengeVisible) {
+      warn("hCaptcha challenge/puzzle is visible after account submission.");
+      if (hcaptchaDiag.iframeCookieVisible) {
+        warn("The hCaptcha iframe can read accessibility cookies, so this is not a plain injection failure.");
+      } else {
+        warn("The hCaptcha iframe cannot read the accessibility cookie from this context.");
+      }
+
+      await browser.close().catch(() => {});
+      killChrome(chromeProcess);
+      cleanupProfile(profileDir);
+      burnInbox();
+      return "CAPTCHA_BLOCKED";
+    }
 
     // ── 4. Confirm Email (with captcha fallback) ─────────────────────────────
     // If no confirmation email arrives, the flow assumes hCaptcha or similar
@@ -529,9 +646,7 @@ ok("Email confirmed.");
     }
 
     if (!hfKey) {
-      fail("Could not extract HF token.");
-      await page.screenshot({ path: "/root/fail_hf_token.png", fullPage: true });
-      process.exit(1);
+      throw new Error("Could not extract HF token.");
     }
 
     ok(`Token extracted: ${hfKey.substring(0, 10)}...`);
@@ -551,6 +666,10 @@ ok("Email confirmed.");
       try { await page.screenshot({ path: "/root/fail_hf_flow.png", fullPage: true }); } catch {}
     }
     burnInbox();
+    if (attempt < maxAttempts && isRetryableRunError(err.message)) {
+      warn("Transient failure detected; retrying the HF flow.");
+      return "RETRY";
+    }
     process.exit(1);
   } finally {
     if (browser) { try { await browser.close(); } catch {} }
@@ -570,6 +689,10 @@ async function main() {
     }
 
     const result = await runOnce(attempt, maxAttempts);
+    if (result === "CAPTCHA_BLOCKED") {
+      fail("HF signup is captcha-blocked; stopping cleanly.");
+      process.exit(CAPTCHA_BLOCK_EXIT_CODE);
+    }
     if (result !== "RETRY") return;
   }
 

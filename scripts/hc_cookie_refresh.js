@@ -392,8 +392,15 @@ function isWantedHcCookie(cookie) {
     );
 }
 
+function partitionKeyValue(cookie) {
+  if (!cookie || !cookie.partitionKey) return "";
+  if (typeof cookie.partitionKey === "string") return cookie.partitionKey;
+  if (cookie.partitionKey.topLevelSite) return cookie.partitionKey.topLevelSite;
+  return JSON.stringify(cookie.partitionKey);
+}
+
 function cookieSortKey(cookie) {
-  return `${cookie.domain}|${cookie.path || "/"}|${cookie.name}`;
+  return `${cookie.domain}|${cookie.path || "/"}|${cookie.name}|${partitionKeyValue(cookie)}`;
 }
 
 function normalizeHcCookies(cookies) {
