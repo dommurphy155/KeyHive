@@ -37,6 +37,7 @@ const CDP_HOST  = "127.0.0.1";
 const X_DISPLAY = ":1";
 const CHROME_LOG = "/root/chrome-9334.log";
 const CONFIRM_EMAIL_TIMEOUT = 20;
+const COOKIE_PRIME_TIMEOUT = 12000;
 
 // ─── Logging ───────────────────────────────────────────────────────────────
 const ts   = () => new Date().toISOString().slice(11, 19);
@@ -199,7 +200,15 @@ function partitionKeyValue(cookie) {
 }
 
 function cookieKey(cookie) {
-  return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}|${partitionKeyValue(cookie)}`;
+  // Chrome may round-trip partition metadata differently after addCookies().
+  // Verify the stable storage identity so partition formatting differences do
+  // not make an accepted cookie look missing.
+  return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}`;
+}
+
+function cookieDiagnosticKey(cookie) {
+  const partition = partitionKeyValue(cookie);
+  return partition ? `${cookieKey(cookie)}|partitionKey=${partition}` : cookieKey(cookie);
 }
 
 function formatCookie(cookie) {
@@ -217,6 +226,22 @@ function formatCookie(cookie) {
 function normalizeCookieValue(value) {
   if (!value) return "";
   return String(value).replace(/\s+/g, " ").trim();
+}
+
+function describeDocumentCookie(cookieText) {
+  // document.cookie exposes readable cookie values, which are credentials in
+  // practice. Keep diagnostics useful by logging only the cookie names present
+  // inside the frame, not the actual secret values.
+  const normalized = normalizeCookieValue(cookieText);
+  if (!normalized) return "[empty]";
+  if (normalized.startsWith("[[unavailable:")) return normalized;
+
+  const names = normalized
+    .split(";")
+    .map((part) => part.trim().split("=")[0])
+    .filter(Boolean);
+
+  return names.length ? names.join(", ") : "[empty]";
 }
 
 async function collectFrameCookieEvidence(frame) {
@@ -238,7 +263,7 @@ async function collectFrameCookieEvidence(frame) {
 
   return {
     url,
-    cookieText: normalizeCookieValue(cookieText),
+    cookieText: describeDocumentCookie(cookieText),
     bodyText: normalizeCookieValue(bodyText),
   };
 }
@@ -265,7 +290,7 @@ async function logHcaptchaDiagnostics(context, page, label) {
 
   for (const frame of frames) {
     const evidence = await collectFrameCookieEvidence(frame);
-    if (/hc_(?:accessibility|at)=/i.test(evidence.cookieText)) iframeCookieVisible = true;
+    if (/hc_(?:accessibility|at)/i.test(evidence.cookieText)) iframeCookieVisible = true;
     if (CAPTCHA_BODY_RE.test(evidence.bodyText) || CAPTCHA_BODY_RE.test(evidence.url)) challengeVisible = true;
 
     warn(`Frame: ${evidence.url}`);
@@ -303,12 +328,87 @@ function toPlaywrightCookie(cookie) {
   return out;
 }
 
-async function injectHcCookies(context, cookies) {
+async function openCookiePrimingTabs(context) {
+  const tabs = [];
+
+  for (const url of HCAPTCHA_COOKIE_URLS) {
+    const tab = await context.newPage();
+    tabs.push(tab);
+
+    try {
+      await tab.goto(url, { waitUntil: "domcontentloaded", timeout: COOKIE_PRIME_TIMEOUT });
+      await tab.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    } catch (err) {
+      dbg(`Cookie priming tab failed for ${url}: ${err.message}`);
+    }
+  }
+
+  return tabs;
+}
+
+async function reloadCookieTabs(tabs) {
+  for (const tab of tabs || []) {
+    if (tab.isClosed()) continue;
+    try {
+      await tab.reload({ waitUntil: "domcontentloaded", timeout: COOKIE_PRIME_TIMEOUT });
+      await tab.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+    } catch (err) {
+      dbg(`Cookie priming tab reload failed for ${tab.url()}: ${err.message}`);
+    }
+  }
+}
+
+async function closePages(pages) {
+  for (const page of pages || []) {
+    try { if (!page.isClosed()) await page.close(); } catch {}
+  }
+}
+
+async function injectHcCookiesWithPriming(context, cookies, label = "browser profile") {
+  // Keep cookie injection on one clean path:
+  // 1. open real hCaptcha-domain tabs so Chrome has live site storage buckets,
+  // 2. add the saved cookie jar to the browser context/profile,
+  // 3. reload those hCaptcha tabs so the renderer process sees the new jar,
+  // 4. verify through context.cookies(), then close the temporary tabs.
+  let tabs = [];
+  try {
+    step(`Opening hCaptcha cookie priming tabs (${label})...`);
+    tabs = await openCookiePrimingTabs(context);
+
+    step(`Injecting hc_cookies into ${label}...`);
+    await injectHcCookies(context, cookies, tabs);
+  } finally {
+    await closePages(tabs);
+  }
+}
+
+async function verifyHcCookiesWithPriming(context, cookies, label = "browser profile") {
+  let tabs = [];
+  try {
+    step(`Opening hCaptcha cookie priming tabs for verification (${label})...`);
+    tabs = await openCookiePrimingTabs(context);
+
+    step(`Verifying hc_cookies in ${label}...`);
+    await verifyHcCookies(context, cookies, tabs);
+  } finally {
+    await closePages(tabs);
+  }
+}
+
+async function injectHcCookies(context, cookies, tabs = []) {
   // Inject the full hCaptcha cookie jar, then verify every cookie we saved is
   // visible in the Playwright context. This keeps the browser session aligned
   // with the exact cookie state produced by hc_cookie_refresh.js.
   const normalized = cookies.map(toPlaywrightCookie);
   await context.addCookies(normalized);
+  await verifyHcCookies(context, normalized, tabs);
+}
+
+async function verifyHcCookies(context, cookies, tabs = []) {
+  // Read-only verification: use this after navigation so the signup flow does
+  // not repeatedly rewrite the same cookie jar mid-session.
+  const normalized = cookies.map(toPlaywrightCookie);
+  await reloadCookieTabs(tabs);
 
   let actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
   let actual = new Set(actualCookies.map(cookieKey));
@@ -316,17 +416,19 @@ async function injectHcCookies(context, cookies) {
 
   if (missing.length > 0) {
     await sleep(1500);
+    await reloadCookieTabs(tabs);
     actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
     actual = new Set(actualCookies.map(cookieKey));
     missing = normalized.filter((cookie) => !actual.has(cookieKey(cookie)));
 
     if (missing.length > 0) {
-      warn(`Missing hCaptcha cookie(s) after injection: ${missing.map(cookieKey).join(", ")}`);
+      warn(`Missing hCaptcha cookie(s) after verification: ${missing.map(cookieDiagnosticKey).join(", ")}`);
+      warn(`Visible hCaptcha cookie(s): ${actualCookies.map(cookieDiagnosticKey).join(", ") || "[none]"}`);
       throw new Error("hCaptcha cookie injection verification failed");
     }
   }
 
-  ok(`Cookie verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
+  ok(`Cookies verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
 }
 
 // ─── Port + profile utils ──────────────────────────────────────────────────
@@ -351,18 +453,35 @@ function launchChrome(profileDir) {
         "--disable-dev-shm-usage",
         "--no-first-run",
         "--no-default-browser-check",
-        // This is a visible browser, not a headless science project; keep the
-        // launch shape stable enough that Google does not immediately freak out.
+        "--disable-extensions",
+        // This is a visible browser, not a headless science project. Every flag
+        // below was verified against THIS box (Ubuntu 24.04 / Chrome 146 / no GPU
+        // passthrough / TigerVNC :1) so the fingerprint matches a real human on a
+        // GPU-less Linux VPS rather than a Windows-impersonating bot.
+        //
+        //   navigator.userAgent   -> Chrome/146 X11; Linux x86_64  (genuine binary)
+        //   navigator.platform    -> Linux x86_64                  (matches UA)
+        //   navigator.webdriver   -> false
+        //   navigator.language    -> en-GB  (needs --accept-lang; --lang alone is ignored)
+        //   Intl timezone         -> Europe/London  (host tz, unspoofed)
+        //   screen                -> real TigerVNC geometry, not a fake 1920x1080
+        //   WebGL                 -> WORKS: ANGLE (Mesa, llvmpipe, OpenGL 4.5)
+        //
+        // The old flags (--use-gl=swiftshader --use-angle=swiftshader-webgl) returned
+        // a NULL WebGL context on this display — a louder bot signal than any renderer
+        // string, and the SwiftShader "0x0000C0DE" device string is the classic
+        // headless tell. llvmpipe is Mesa's stock software rasterizer; it's exactly
+        // what a real GPU-less Linux user shows.
         "--disable-blink-features=AutomationControlled",
-        "--use-gl=swiftshader",
-        "--use-angle=swiftshader-webgl",
-        "--enable-webgl",
         "--ignore-gpu-blocklist",
-        "--enable-gpu-rasterization",
-        "--window-size=1920,1080",
-        "--start-maximized",
+        "--enable-unsafe-swiftshader",
         "--lang=en-GB",
-        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        "--accept-lang=en-GB,en",
+        // No --user-agent override: the installed Chrome 146 already emits the
+        // correct Linux UA, and faking Windows here leaves navigator.platform as
+        // "Linux x86_64" — UA/platform mismatch is a textbook automation tell.
+        // No --window-size: let Chrome use the real TigerVNC display geometry
+        // (820x1048 here) instead of lying about a 1080p desktop that isn't there.
       ],
       {
         env:      { ...process.env, DISPLAY: X_DISPLAY },
@@ -433,10 +552,9 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     browser = await chromium.connectOverCDP(`http://${CDP_HOST}:${CDP_PORT}`);
     const context = browser.contexts()[0] ?? (await browser.newContext());
 
-    step("Injecting hc_cookies...");
-    await injectHcCookies(context, cookies);
+    await injectHcCookiesWithPriming(context, cookies, "fresh burner profile");
 
-    page = context.pages()[0] ?? (await context.newPage());
+    page = await context.newPage();
 
     // ── 3. Register on HF ──────────────────────────────────────────────────
     step("Navigating to Hugging Face join page...");
@@ -492,7 +610,8 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     await humanDelay();
 
     step("Verifying cookies in session...");
-    await injectHcCookies(context, cookies);
+    await verifyHcCookiesWithPriming(context, cookies, "active HF session");
+    await page.bringToFront().catch(() => {});
 
     step("Checking terms checkbox...");
     const checkbox = page.locator('input[type="checkbox"]').first();

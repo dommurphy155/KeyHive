@@ -20,11 +20,12 @@ from proxy.fallback.nvidia_client import NvidiaClient
 from proxy.hf_client import HFClient, retry_after_seconds
 from proxy.key_store import KeyState, KeyStore
 from proxy.openai_compat import (
-    extract_router_content,
-    anthropic_response,
-    anthropic_sse,
-    non_stream_response,
+    anthropic_openai_payload,
+    anthropic_response_from_blocks,
+    anthropic_sse_from_response,
     normalize_messages,
+    openai_response_from_router,
+    openai_response_to_anthropic,
     openai_error,
     sse_from_text,
 )
@@ -279,61 +280,54 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
     if isinstance(body, JSONResponse):
         return body
 
-    try:
-        messages = normalize_messages(body.get("messages"))
-    except ValueError as exc:
-        return json_error(str(exc), "bad_request", 400)
-
-    system = body.get("system")
-    if system:
-        messages.insert(0, {"role": "system", "content": str(system)})
-
     requested_model = str(body.get("model") or "claude")
-    upstream_model = DEFAULT_MODEL
-
-    payload = {
-        "model": upstream_model,
-        "messages": messages,
-        "max_tokens": body.get("max_tokens", 1024),
-        "temperature": body.get("temperature", 0.7),
-        "stream": False,
-    }
+    try:
+        payload = anthropic_openai_payload(body, DEFAULT_MODEL)
+    except ValueError as exc:
+        return JSONResponse(
+            {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}},
+            status_code=400,
+        )
 
     active_requests += 1
     try:
-        status, content = await complete_text(requested_model, payload)
+        response = await handle_non_stream(DEFAULT_MODEL, payload)
     finally:
         active_requests -= 1
 
+    if response.status_code != 200:
+        data = json.loads(response.body.decode("utf-8"))
+        message = data.get("error", {}).get("message", "proxy error")
+        status = response.status_code
+        if body.get("stream"):
+            error_response = anthropic_response_from_blocks(
+                requested_model,
+                [{"type": "text", "text": f"KeyHive proxy error ({status}): {message}"}],
+                "error",
+            )
+            return StreamingResponse(
+                anthropic_sse_from_response(error_response),
+                status_code=200 if status < 500 else status,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return JSONResponse(
+            {"type": "error", "error": {"type": "api_error", "message": str(message)}},
+            status_code=status,
+        )
+
+    openai_payload = json.loads(response.body.decode("utf-8"))
+    anthropic_payload = openai_response_to_anthropic(requested_model, openai_payload)
+
     if body.get("stream"):
         return StreamingResponse(
-            anthropic_sse(requested_model, content if status == 200 else f"KeyHive proxy error ({status}): {content}"),
-            status_code=200 if status < 500 else status,
+            anthropic_sse_from_response(anthropic_payload),
+            status_code=200,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    if status != 200:
-        return JSONResponse(
-            {"type": "error", "error": {"type": "api_error", "message": content}},
-            status_code=status,
-        )
-    return JSONResponse(anthropic_response(requested_model, content))
-
-
-async def complete_text(model: str, payload: dict[str, Any]) -> tuple[int, str]:
-    # Used by the Anthropic route so the proxy can reuse the same request path
-    # without duplicating the upstream handling logic.
-    response = await handle_non_stream(model, payload)
-    data = json.loads(response.body.decode("utf-8"))
-    if response.status_code != 200:
-        message = data.get("error", {}).get("message", "proxy error")
-        return response.status_code, str(message)
-    choices = data.get("choices") or []
-    if choices:
-        message = choices[0].get("message", {})
-        return 200, str(message.get("content", ""))
-    return 200, ""
+    return JSONResponse(anthropic_payload)
 
 
 async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse:
@@ -374,8 +368,7 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
             continue
 
         if response.status_code < 400 and response.json_data is not None:
-            content = extract_router_content(response.json_data)
-            return JSONResponse(non_stream_response(model, content))
+            return JSONResponse(openai_response_from_router(model, response.json_data))
 
         await mark_status(state, response.status_code, response.headers)
         last_status = response.status_code
@@ -544,8 +537,7 @@ async def handle_nvidia_non_stream(model: str, payload: dict[str, Any]) -> JSONR
         return json_error(f"NVIDIA fallback failed: {exc.__class__.__name__}", "upstream_error", 502)
     if response.status_code >= 400:
         return json_error(upstream_error_text(response), "upstream_error", response.status_code)
-    content = extract_router_content(response.json_data or {})
-    return JSONResponse(non_stream_response(model, content))
+    return JSONResponse(openai_response_from_router(model, response.json_data or {}))
 
 
 async def handle_nvidia_stream(model: str, payload: dict[str, Any]) -> StreamingResponse | JSONResponse:
