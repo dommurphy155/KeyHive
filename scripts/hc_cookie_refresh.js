@@ -294,6 +294,10 @@ async function visible(locator) {
   }
 }
 
+async function bodyText(page) {
+  try { return await page.locator("body").innerText({ timeout: 3000 }); } catch { return ""; }
+}
+
 async function selectGoogleAccountIfShown(page, account) {
   // When Google offers an account chooser, reuse the existing session instead
   // of forcing another password prompt.
@@ -315,7 +319,22 @@ async function findSetCookieButton(context, timeout = POLL_TIMEOUT) {
   const deadline = Date.now() + timeout;
 
   while (Date.now() < deadline) {
-    for (const pg of context.pages()) {
+    const pages = context.pages()
+      .filter((pg) => {
+        try {
+          const url = pg.url();
+          return url.includes("hcaptcha.com") || url === "about:blank";
+        } catch {
+          return false;
+        }
+      })
+      .sort((a, b) => {
+        const aDashboard = a.url().includes("dashboard.hcaptcha.com") ? 0 : 1;
+        const bDashboard = b.url().includes("dashboard.hcaptcha.com") ? 0 : 1;
+        return aDashboard - bDashboard;
+      });
+
+    for (const pg of pages) {
       try {
         const loc = pg.getByRole("button", { name: /set cookie/i });
         if (await visible(loc)) return { dashPage: pg, setCookieEl: loc.first() };
@@ -332,29 +351,38 @@ async function findSetCookieButton(context, timeout = POLL_TIMEOUT) {
 }
 
 async function trySetCookieAndExtract(context, label, timeout = 500) {
-  // Click the accessibility control and then verify the cookie jar actually
-  // contains the hCaptcha accessibility token before we claim success.
+  // Single attempt: find the Set Cookie control, click it, check the page for
+  // a quota message, then verify the cookie jar actually gained the hCaptcha
+  // accessibility token. Returns the cookies on success, null if the button is
+  // not present or the click did not produce a usable cookie. The caller drives
+  // the reload-and-retry loop — re-clicking a spent button never helps.
   const { dashPage, setCookieEl } = await findSetCookieButton(context, timeout);
   if (!dashPage || !setCookieEl) return null;
 
   step(`Set Cookie visible (${label}) — clicking now...`);
 
-  try { checkBodyForQuota(await dashPage.innerText("body")); } catch (e) {
+  try { checkBodyForQuota(await bodyText(dashPage)); } catch (e) {
     if (e instanceof QuotaError) throw e;
   }
 
   await setCookieEl.scrollIntoViewIfNeeded();
   await humanDelay(250, 600);
-  await setCookieEl.click();
+  await Promise.all([
+    dashPage.waitForLoadState("domcontentloaded", { timeout: 8000 }).catch(() => {}),
+    setCookieEl.click(),
+  ]);
   await sleep(2500);
 
-  try { checkBodyForQuota(await dashPage.innerText("body")); } catch (e) {
+  try { checkBodyForQuota(await bodyText(dashPage)); } catch (e) {
     if (e instanceof QuotaError) throw e;
   }
 
   await sleep(2500);
   const cookies = await extractHcCookies(context, dashPage);
-  if (!cookies || cookies.length === 0) throw new Error("No hcaptcha cookies found after Set Cookie click");
+  if (!cookies || cookies.length === 0) {
+    warn("No hCaptcha cookies found after Set Cookie click — will keep trying...");
+    return null;
+  }
 
   if (!hasAccessibilityCookie(cookies)) {
     warn("Accessibility token (hc_at) not found — waiting longer...");
@@ -364,10 +392,42 @@ async function trySetCookieAndExtract(context, label, timeout = 500) {
   }
 
   if (!hasAccessibilityCookie(cookies)) {
-    throw new Error("No hCaptcha accessibility cookie found after Set Cookie click");
+    warn("No hCaptcha accessibility cookie found after Set Cookie click — will keep trying...");
+    return null;
   }
 
   return cookies;
+}
+
+async function reloadHcaptchaAccessibility(page) {
+  step("Reloading hcaptcha accessibility page...");
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 }).catch((err) => {
+    warn(`hCaptcha reload did not fully settle: ${err.message}`);
+  });
+  await humanDelay(1500, 2500);
+}
+
+// Drive the Set Cookie flow with the same rules for every account:
+// find the button → click it → check for a quota error → check the cookie jar
+// → if no cookie appeared, reload the accessibility page and try again. A
+// single Set Cookie click can silently no-op (hCaptcha returns nothing), so a
+// real retry requires a fresh page load, not a repeated click on a spent button.
+async function runSetCookieLoop(context, page, label, totalTimeout = 30000, findTimeout = 1500) {
+  const deadline = Date.now() + totalTimeout;
+  let attempt = 0;
+
+  while (Date.now() < deadline) {
+    attempt++;
+    const cookies = await trySetCookieAndExtract(context, `${label} #${attempt}`, findTimeout);
+    if (cookies) return cookies;
+
+    // No cookie this round — reload so the next attempt starts from a clean
+    // dashboard instead of re-clicking a control that already fired.
+    if (Date.now() < deadline) {
+      await reloadHcaptchaAccessibility(page);
+    }
+  }
+  return null;
 }
 
 // ─── Cookie extraction ─────────────────────────────────────────────────────
@@ -488,12 +548,18 @@ async function attemptAccount(account) {
     });
     await humanDelay(1500, 2500);
 
-    let cookies = await trySetCookieAndExtract(context, "after hcaptcha load", 5000);
+    // Every account follows the same Set Cookie rules: find the button, click it,
+    // check for a quota message, check the cookie jar, and reload-and-retry if no
+    // cookie appeared. This is the path that works for an already-authenticated
+    // profile (account 1's happy path), so we try it first and hardest.
+    let cookies = await runSetCookieLoop(context, page, "after hcaptcha load", 20000, 1500);
     if (cookies) return cookies;
 
     // ── 2. Sign in with Google ───────────────────────────────────────────────
-    // The dashboard may already expose Set Cookie, so the script checks for it
-    // before and after the Google sign-in path.
+    // Only reach for the Google sign-in path if the dashboard still requires it
+    // (i.e. Set Cookie never appeared). Re-running the loop after each Google
+    // step means a profile that becomes authenticated mid-flow is caught here
+    // instead of being driven blindly through the full login form.
     step("Clicking Sign in with Google...");
     await pollAndClick(page, "SignInWithGoogle", [
       { description: 'getByRole button "sign in with google"', locatorFn: (p) => p.getByRole("button", { name: /sign in with google/i }) },
@@ -504,7 +570,7 @@ async function attemptAccount(account) {
       { description: 'a[href*="accounts.google.com"]',         locatorFn: (p) => p.locator('a[href*="accounts.google.com"]') },
     ]);
     await humanDelay(1000, 1500);
-    cookies = await trySetCookieAndExtract(context, "after Google sign-in click", 2500);
+    cookies = await runSetCookieLoop(context, page, "after Google sign-in click", 8000, 1000);
     if (cookies) return cookies;
 
     // ── 3. Find Google auth page ─────────────────────────────────────────────
@@ -513,8 +579,6 @@ async function attemptAccount(account) {
     const gDeadline = Date.now() + 20000;
 
     while (Date.now() < gDeadline) {
-      cookies = await trySetCookieAndExtract(context, "while waiting for Google auth", 250);
-      if (cookies) return cookies;
       for (const pg of context.pages()) {
         try {
           if (pg.url().includes("accounts.google.com")) { googlePage = pg; break; }
@@ -531,11 +595,8 @@ async function attemptAccount(account) {
     ok("Google auth opened");
     try { await googlePage.waitForLoadState("domcontentloaded", { timeout: 10000 }); } catch {}
     await humanDelay(1000, 2000);
-    cookies = await trySetCookieAndExtract(context, "after Google auth opened", 1000);
-    if (cookies) return cookies;
-
     await selectGoogleAccountIfShown(googlePage, account);
-    cookies = await trySetCookieAndExtract(context, "after account selection", 5000);
+    cookies = await runSetCookieLoop(context, page, "after account selection", 8000, 1000);
     if (cookies) return cookies;
 
     // ── 4. Email ─────────────────────────────────────────────────────────────
@@ -560,7 +621,7 @@ async function attemptAccount(account) {
       await humanDelay(2500, 3500);
     }
 
-    cookies = await trySetCookieAndExtract(context, "after email step", 3000);
+    cookies = await runSetCookieLoop(context, page, "after email step", 8000, 1000);
     if (cookies) return cookies;
 
     // ── 6. Password ──────────────────────────────────────────────────────────
@@ -580,17 +641,17 @@ async function attemptAccount(account) {
         { description: 'getByRole button "Next"',    locatorFn: (p) => p.getByRole("button", { name: /^next$/i }) },
         { description: 'div[id="passwordNext"]',     locatorFn: (p) => p.locator('div[id="passwordNext"]') },
       ]);
+      await humanDelay(2500, 3500);
     }
 
-    step("Waiting for Set Cookie button...");
-    const finalDeadline = Date.now() + 30000;
-    while (Date.now() < finalDeadline) {
-      cookies = await trySetCookieAndExtract(context, "final wait", 500);
-      if (cookies) return cookies;
-      await sleep(POLL_INTERVAL);
-    }
+    // ── 8. Final Set Cookie drive ────────────────────────────────────────────
+    // After the Google login has settled, give the accessibility dashboard a
+    // generous reload-and-retry window. This is the catch-all that mirrors what
+    // account 1 does on a fresh authenticated profile.
+    cookies = await runSetCookieLoop(context, page, "after Google auth", 35000, 1500);
+    if (cookies) return cookies;
 
-    throw new Error("Set Cookie button never appeared");
+    throw new Error("Set Cookie never produced an accessibility cookie");
 
   } finally {
     if (browser) { try { await browser.close(); } catch {} }
