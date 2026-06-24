@@ -1,3 +1,10 @@
+/*
+ * Login page styles (login.html). Loaded after styles.css, so it reuses the
+ * design tokens defined there (--bg, --panel, --line, --radius, --shadow, etc.)
+ * rather than redeclaring the palette. Shares the same black/amber theme.
+ */
+
+/* Full-viewport centered shell so the card sits dead-center on any screen. */
 .login-body {
   display: grid;
   min-height: 100vh;
@@ -8,10 +15,12 @@
     var(--bg);
 }
 
+/* Constrains the card width so the form does not stretch wide on big screens. */
 .login-shell {
   width: min(100%, 440px);
 }
 
+/* The bordered card that holds the brand image, heading, and login form. */
 .login-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -20,6 +29,7 @@
   padding: 24px;
 }
 
+/* KeyHive header image at the top of the card. */
 .login-brand {
   display: block;
   width: min(100%, 238px);
@@ -30,6 +40,7 @@
   font-size: 26px;
 }
 
+/* The single password/token field plus submit button. */
 .login-form {
   display: grid;
   gap: 11px;
@@ -56,6 +67,7 @@
   justify-content: center;
 }
 
+/* Inline status line: red for failures, green (.ok) for an accepted login. */
 .login-message {
   min-height: 20px;
   margin: 0;
@@ -67,12 +79,14 @@
   color: var(--ok);
 }
 
+/* Disclaimer that route protection is not wired up yet. */
 .login-note {
   color: var(--muted);
   font-size: var(--font-sm);
   margin: 18px 0 0;
 }
 
+/* Tighten padding on small screens so the card does not touch the edges. */
 @media (max-width: 420px) {
   .login-body {
     padding: 12px;

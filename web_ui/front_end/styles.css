@@ -1,3 +1,12 @@
+/*
+ * KeyHive dashboard styles.
+ * Single static stylesheet for the operator control surface served at /static/styles.css.
+ * Black/amber theme. Sections below, in order: design tokens, base reset, app shell
+ * + sidebar nav, topbar, buttons, status/badge states, dashboard cards & metrics,
+ * detail lists, compact stat pills, failure cards, log viewer + SSE stream bits,
+ * and the settings form.
+ */
+
 :root {
   --bg: #050505;
   --bg-elevated: #090807;
@@ -65,6 +74,7 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+/* ── App shell + sidebar navigation ─────────────────────────────────────── */
 .app-shell {
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
@@ -132,6 +142,7 @@ input:focus-visible {
   color: var(--amber-2);
 }
 
+/* ── Main column: topbar, page routing, security banner ──────────────────── */
 .main {
   width: min(100%, 1600px);
   min-width: 0;
@@ -242,6 +253,7 @@ h3 {
   accent-color: var(--amber);
 }
 
+/* ── Status banners: security warning, error, empty states ──────────────── */
 .security-warning,
 .error,
 .empty-state {
@@ -274,6 +286,7 @@ h3 {
   display: block;
 }
 
+/* ── Dashboard grids, cards, and metric tiles ────────────────────────────── */
 .grid {
   display: grid;
   gap: var(--space-3);
@@ -344,6 +357,7 @@ h3 {
   padding: var(--space-4);
 }
 
+/* ── Detail lists (label/value rows used across scanner/proxy/stats pages) ── */
 .details {
   display: grid;
   grid-template-columns: minmax(120px, 170px) minmax(0, 1fr);
@@ -379,6 +393,7 @@ h3 {
   margin-left: auto;
 }
 
+/* ── Status badges + color tones (ok/warn/bad/idle) ──────────────────────── */
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -445,6 +460,7 @@ h3 {
   color: #b8aea2;
 }
 
+/* ── Compact stat pills (Total / Success / Failed summaries) ─────────────── */
 .compact-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -472,6 +488,7 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+/* ── Failure cards: collapsible log-context entries on the dashboard ──────── */
 .failure-list {
   display: grid;
   gap: 8px;
@@ -558,6 +575,7 @@ h3 {
   cursor: pointer;
 }
 
+/* ── Log viewer: output box, per-line tones, live/paused stream markers ──── */
 .log-output {
   margin: 12px 0 0;
   min-height: 460px;
@@ -602,6 +620,7 @@ h3 {
   color: var(--warning);
 }
 
+/* ── Settings form: cards, field rows, inputs, readonly values, help text ── */
 .settings-form {
   display: grid;
   gap: var(--space-3);

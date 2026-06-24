@@ -1,9 +1,0 @@
-2026/06/22-22:38:56.681 38ce39 Reusing MANIFEST /root/api_maker/profiles/google/dmurph20255_gmail.com/Default/IndexedDB/https_mail.google.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/06/22-22:38:56.682 38ce39 Recovering log #22
-2026/06/22-22:38:56.727 38ce39 Reusing old log /root/api_maker/profiles/google/dmurph20255_gmail.com/Default/IndexedDB/https_mail.google.com_0.indexeddb.leveldb/000022.log 
-2026/06/22-22:39:03.770 38ce42 Compacting 1@1 + 1@2 files
-2026/06/22-22:39:03.804 38ce42 Generated table #26@1: 77 keys, 183539 bytes
-2026/06/22-22:39:03.804 38ce42 Compacted 1@1 + 1@2 files => 183539 bytes
-2026/06/22-22:39:03.947 38ce42 compacted to: files[ 0 0 1 0 0 0 0 ]
-2026/06/22-22:39:03.948 38ce42 Delete type=2 #24
-2026/06/22-22:39:03.948 38ce42 Delete type=2 #19

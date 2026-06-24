@@ -1,3 +1,20 @@
+"""
+Tool-protocol compatibility tests for proxy/openai_compat.py.
+
+The proxy translates between two different tool-calling formats so a single
+Hugging Face / NVIDIA backend can serve both OpenAI-style clients and
+Anthropic-style clients (e.g. Claude Code):
+
+  - OpenAI: assistant messages carry a `tool_calls` array; tool results come
+    back as `role: "tool"` messages with a `tool_call_id`.
+  - Anthropic: assistant messages carry `tool_use` content blocks; tool
+    results come back as `tool_result` blocks inside a user message, keyed by
+    `tool_use_id`.
+
+These tests pin the round-trip behavior so a refactor of openai_compat.py
+cannot silently break tool calling for either client family.
+"""
+
 import json
 
 import pytest
@@ -11,6 +28,9 @@ from proxy.openai_compat import (
 
 
 def test_normalize_messages_preserves_openai_tool_protocol() -> None:
+    # A native OpenAI message array should pass through normalization with its
+    # tool_calls and tool-result linkage intact — flattening must not strip
+    # the protocol fields that downstream tool-using clients depend on.
     messages = normalize_messages(
         [
             {"role": "user", "content": "call the tool"},
@@ -34,6 +54,10 @@ def test_normalize_messages_preserves_openai_tool_protocol() -> None:
 
 
 def test_anthropic_payload_translates_tools_and_results_to_openai() -> None:
+    # An Anthropic request (system block, tool_use, tool_result) must be
+    # rewritten into the OpenAI shape the upstream provider expects: a system
+    # message, an assistant tool_calls entry, a tool-role result, and an
+    # OpenAI `tools` schema derived from the Anthropic `input_schema`.
     payload = anthropic_openai_payload(
         {
             "system": [{"type": "text", "text": "Be terse."}],
@@ -84,6 +108,10 @@ def test_anthropic_payload_translates_tools_and_results_to_openai() -> None:
 
 
 def test_openai_tool_call_response_translates_to_anthropic_tool_use() -> None:
+    # The reverse direction: an OpenAI chat completion that returned tool_calls
+    # must be reshaped into an Anthropic message with tool_use content blocks,
+    # a tool_use stop reason, and the token usage mapped to Anthropic field
+    # names. This is what Claude Code receives back from the proxy.
     openai_payload = openai_response_from_router(
         "zai-org/GLM-5.2",
         {
@@ -127,5 +155,8 @@ def test_openai_tool_call_response_translates_to_anthropic_tool_use() -> None:
 
 
 def test_invalid_anthropic_messages_rejected() -> None:
+    # An empty messages array is not a valid request in either protocol, so the
+    # translator should reject it up front with a clear ValueError rather than
+    # forwarding a malformed payload upstream.
     with pytest.raises(ValueError, match="messages must be a non-empty array"):
         anthropic_openai_payload({"messages": []}, "model")

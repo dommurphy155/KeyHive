@@ -25,24 +25,26 @@ const COOKIE_PATH    = path.join(ROOT_DIR, "data", "hc_cookie.json");
 const KEYS_PATH      = path.join(ROOT_DIR, "data", "keys.txt");
 const REFRESH_SCRIPT = path.join(ROOT_DIR, "scripts", "hc_cookie_refresh.js");
 const BURNER_SCRIPT  = path.join(ROOT_DIR, "scripts", "burner_email.py");
+const HCAPTCHA_LOGIN_URL = "https://dashboard.hcaptcha.com/login?type=accessibility";
 const HCAPTCHA_COOKIE_URLS = [
   "https://hcaptcha.com",
   "https://www.hcaptcha.com",
+  "https://dashboard.hcaptcha.com",
   "https://accounts.hcaptcha.com",
   "https://api.hcaptcha.com",
 ];
 const CAPTCHA_BLOCK_EXIT_CODE = 2;
 const HF_SIGNUP_URL = "https://huggingface.co/join";
-const HCAPTCHA_FRAME_RE = /(^|:\/\/)([^/]+\.)?hcaptcha\.com/i;
-const CAPTCHA_BODY_RE = /(select all|verify you are human|i'?m human|challenge|captcha|puzzle)/i;
 
 // Chrome runs with a throwaway profile dir so the signup flow can be observed
 // and cleaned up without disturbing the browser-strength profiles. Patchright
 // talks to Chrome over a protocol pipe (not a network CDP port), so there's no
 // remote-debugging-port to manage here — launchPersistentContext handles it.
 const X_DISPLAY = ":1";
-const CONFIRM_EMAIL_TIMEOUT = 20;
+const CONFIRM_EMAIL_TIMEOUT = 7;
+const CREATE_ACCOUNT_SETTLE_TIMEOUT = 7000;
 const COOKIE_PRIME_TIMEOUT = 12000;
+const COOKIE_PRIME_TAB_COUNT = 3;
 
 // ─── Logging ───────────────────────────────────────────────────────────────
 const ts   = () => new Date().toISOString().slice(11, 19);
@@ -99,6 +101,15 @@ function generateFullName() {
 }
 
 // ─── 1. Cookie Check ──────────────────────────────────────────────────────
+function readCookieFile() {
+  const data = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf-8"));
+  return Array.isArray(data) ? data : [data];
+}
+
+function isCookieExpired(cookie, leewaySeconds = 300) {
+  return Boolean(cookie.expires && cookie.expires > 0 && cookie.expires <= (Date.now() / 1000) + leewaySeconds);
+}
+
 async function ensureCookies() {
   step("Checking hc_cookie.json...");
   let needsRefresh = false;
@@ -114,7 +125,24 @@ async function ensureCookies() {
       step(`Cookie is ${hours.toFixed(1)} hours old (>24h).`);
       needsRefresh = true;
     } else {
-      ok(`Cookie is fresh (${hours.toFixed(1)}h old).`);
+      let cookies = [];
+      try {
+        cookies = readCookieFile();
+      } catch (err) {
+        warn(`Cookie file is unreadable: ${err.message}`);
+        needsRefresh = true;
+      }
+
+      const hcAccessibility = pickHcAccessibilityCookie(cookies);
+      if (!needsRefresh && !hcAccessibility) {
+        warn("hc_cookie.json has no hc_accessibility cookie.");
+        needsRefresh = true;
+      } else if (!needsRefresh && isCookieExpired(hcAccessibility)) {
+        warn("hc_accessibility cookie is expired or about to expire.");
+        needsRefresh = true;
+      } else if (!needsRefresh) {
+        ok(`Cookie is fresh (${hours.toFixed(1)}h old, hc_accessibility valid).`);
+      }
     }
   }
 
@@ -131,9 +159,18 @@ async function ensureCookies() {
     }
   }
 
-  const data = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf-8"));
-  // Support both the old single-cookie format and the current array format.
-  return Array.isArray(data) ? data : [data];
+  const cookies = readCookieFile();
+  const hcAccessibility = pickHcAccessibilityCookie(cookies);
+  if (!hcAccessibility) {
+    fail("hc_cookie.json still has no hc_accessibility cookie after refresh.");
+    process.exit(1);
+  }
+  if (isCookieExpired(hcAccessibility, 0)) {
+    fail("hc_cookie.json still has an expired hc_accessibility cookie after refresh.");
+    process.exit(1);
+  }
+
+  return cookies;
 }
 
 // ─── 2. Burner Email ──────────────────────────────────────────────────────
@@ -183,11 +220,23 @@ function burnInbox() {
   }
 }
 
+function refreshCookiesOrExit() {
+  step("Running hc_cookie_refresh.js...");
+  try {
+    execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
+    ok("Cookies refreshed. Retrying HF flow...");
+  } catch (e) {
+    fail("Cookie refresh failed.");
+    process.exit(1);
+  }
+}
+
 function isRetryableRunError(message) {
   const text = String(message || "").toLowerCase();
   return [
     "hcaptcha accessibility cookie injection failed",
     "hcaptcha cookie injection verification failed",
+    "hc_accessibility cookie missing before submit",
     "could not extract hf token",
   ].some((needle) => text.includes(needle));
 }
@@ -211,99 +260,31 @@ function cookieKey(cookie) {
   return `${cookie.name}|${cookie.domain}|${cookie.path || "/"}`;
 }
 
+function cookieName(cookie) {
+  return String(cookie?.name || "").toLowerCase();
+}
+
+function pickHcAccessibilityCookie(cookies) {
+  return cookies.find((cookie) => cookieName(cookie) === "hc_accessibility") || null;
+}
+
+function hasHcAccessibilityCookie(cookies) {
+  return Boolean(pickHcAccessibilityCookie(cookies));
+}
+
+async function waitForUsernameForm(page, timeout = 30000) {
+  const usernameInput = page.locator('input[name="username"]');
+  try {
+    await usernameInput.waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function cookieDiagnosticKey(cookie) {
   const partition = partitionKeyValue(cookie);
   return partition ? `${cookieKey(cookie)}|partitionKey=${partition}` : cookieKey(cookie);
-}
-
-function formatCookie(cookie) {
-  const parts = [
-    `${cookie.name}@${cookie.domain}${cookie.path || "/"}`,
-    `sameSite=${cookie.sameSite || "?"}`,
-    `secure=${Boolean(cookie.secure)}`,
-    `httpOnly=${Boolean(cookie.httpOnly)}`,
-  ];
-  const partition = partitionKeyValue(cookie);
-  if (partition) parts.push(`partitionKey=${partition}`);
-  return parts.join(" ");
-}
-
-function normalizeCookieValue(value) {
-  if (!value) return "";
-  return String(value).replace(/\s+/g, " ").trim();
-}
-
-function describeDocumentCookie(cookieText) {
-  // document.cookie exposes readable cookie values, which are credentials in
-  // practice. Keep diagnostics useful by logging only the cookie names present
-  // inside the frame, not the actual secret values.
-  const normalized = normalizeCookieValue(cookieText);
-  if (!normalized) return "[empty]";
-  if (normalized.startsWith("[[unavailable:")) return normalized;
-
-  const names = normalized
-    .split(";")
-    .map((part) => part.trim().split("=")[0])
-    .filter(Boolean);
-
-  return names.length ? names.join(", ") : "[empty]";
-}
-
-async function collectFrameCookieEvidence(frame) {
-  const url = frame.url();
-  let cookieText = "";
-  let bodyText = "";
-
-  try {
-    cookieText = await frame.evaluate(() => document.cookie);
-  } catch (err) {
-    cookieText = `[[unavailable: ${err.message}]]`;
-  }
-
-  try {
-    bodyText = await frame.evaluate(() => document.body?.innerText || document.documentElement?.innerText || "");
-  } catch (err) {
-    bodyText = `[[unavailable: ${err.message}]]`;
-  }
-
-  return {
-    url,
-    cookieText: describeDocumentCookie(cookieText),
-    bodyText: normalizeCookieValue(bodyText),
-  };
-}
-
-async function logHcaptchaDiagnostics(context, page, label) {
-  warn(`hCaptcha diagnostics (${label})`);
-  warn(`Top-level URL: ${page.url()}`);
-
-  const cookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
-  if (!cookies.length) {
-    warn("No hCaptcha-domain cookies visible in the context");
-  } else {
-    for (const cookie of cookies) warn(`Cookie: ${formatCookie(cookie)}`);
-  }
-
-  const frames = page.frames().filter((frame) => HCAPTCHA_FRAME_RE.test(frame.url()));
-  if (!frames.length) {
-    warn("No hCaptcha iframe/frame URLs found on the page");
-    return { challengeVisible: false, iframeCookieVisible: false };
-  }
-
-  let iframeCookieVisible = false;
-  let challengeVisible = false;
-
-  for (const frame of frames) {
-    const evidence = await collectFrameCookieEvidence(frame);
-    if (/hc_(?:accessibility|at)/i.test(evidence.cookieText)) iframeCookieVisible = true;
-    if (CAPTCHA_BODY_RE.test(evidence.bodyText) || CAPTCHA_BODY_RE.test(evidence.url)) challengeVisible = true;
-
-    warn(`Frame: ${evidence.url}`);
-    warn(`  document.cookie: ${evidence.cookieText || "[empty]"}`);
-    if (evidence.bodyText) warn(`  body text: ${evidence.bodyText.slice(0, 300)}`);
-  }
-
-  return { challengeVisible, iframeCookieVisible };
 }
 
 function toPlaywrightCookie(cookie) {
@@ -336,31 +317,19 @@ function toPlaywrightCookie(cookie) {
 async function openCookiePrimingTabs(context) {
   const tabs = [];
 
-  for (const url of HCAPTCHA_COOKIE_URLS) {
+  for (let i = 0; i < COOKIE_PRIME_TAB_COUNT; i++) {
     const tab = await context.newPage();
     tabs.push(tab);
 
     try {
-      await tab.goto(url, { waitUntil: "domcontentloaded", timeout: COOKIE_PRIME_TIMEOUT });
+      await tab.goto(HCAPTCHA_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: COOKIE_PRIME_TIMEOUT });
       await tab.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
     } catch (err) {
-      dbg(`Cookie priming tab failed for ${url}: ${err.message}`);
+      dbg(`Cookie priming tab failed for ${HCAPTCHA_LOGIN_URL}: ${err.message}`);
     }
   }
 
   return tabs;
-}
-
-async function reloadCookieTabs(tabs) {
-  for (const tab of tabs || []) {
-    if (tab.isClosed()) continue;
-    try {
-      await tab.reload({ waitUntil: "domcontentloaded", timeout: COOKIE_PRIME_TIMEOUT });
-      await tab.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-    } catch (err) {
-      dbg(`Cookie priming tab reload failed for ${tab.url()}: ${err.message}`);
-    }
-  }
 }
 
 async function closePages(pages) {
@@ -369,71 +338,49 @@ async function closePages(pages) {
   }
 }
 
-async function injectHcCookiesWithPriming(context, cookies, label = "browser profile") {
-  // Keep cookie injection on one clean path:
-  // 1. open real hCaptcha-domain tabs so Chrome has live site storage buckets,
-  // 2. add the saved cookie jar to the browser context/profile,
-  // 3. reload those hCaptcha tabs so the renderer process sees the new jar,
-  // 4. verify through context.cookies(), then close the temporary tabs.
+async function injectHcAccessibilityWithPriming(context, cookies, label = "browser profile") {
+  const hcAccessibility = pickHcAccessibilityCookie(cookies);
+  if (!hcAccessibility) {
+    throw new Error("hc_accessibility cookie missing from hc_cookie.json");
+  }
+
   let tabs = [];
   try {
-    step(`Opening hCaptcha cookie priming tabs (${label})...`);
+    step(`Opening ${COOKIE_PRIME_TAB_COUNT} hCaptcha login priming tabs (${label})...`);
     tabs = await openCookiePrimingTabs(context);
 
-    step(`Injecting hc_cookies into ${label}...`);
-    await injectHcCookies(context, cookies, tabs);
+    step(`Injecting hc_accessibility into ${label}...`);
+    await context.addCookies([toPlaywrightCookie(hcAccessibility)]);
+    ok("hc_accessibility injected");
   } finally {
     await closePages(tabs);
   }
 }
 
-async function verifyHcCookiesWithPriming(context, cookies, label = "browser profile") {
-  let tabs = [];
-  try {
-    step(`Opening hCaptcha cookie priming tabs for verification (${label})...`);
-    tabs = await openCookiePrimingTabs(context);
-
-    step(`Verifying hc_cookies in ${label}...`);
-    await verifyHcCookies(context, cookies, tabs);
-  } finally {
-    await closePages(tabs);
+async function ensureHcCookiesBeforeSubmit(context, cookies) {
+  const hcAccessibility = pickHcAccessibilityCookie(cookies);
+  if (!hcAccessibility) {
+    throw new Error("hc_accessibility cookie missing from hc_cookie.json");
   }
-}
-
-async function injectHcCookies(context, cookies, tabs = []) {
-  // Inject the full hCaptcha cookie jar, then verify every cookie we saved is
-  // visible in the Playwright context. This keeps the browser session aligned
-  // with the exact cookie state produced by hc_cookie_refresh.js.
-  const normalized = cookies.map(toPlaywrightCookie);
-  await context.addCookies(normalized);
-  await verifyHcCookies(context, normalized, tabs);
-}
-
-async function verifyHcCookies(context, cookies, tabs = []) {
-  // Read-only verification: use this after navigation so the signup flow does
-  // not repeatedly rewrite the same cookie jar mid-session.
-  const normalized = cookies.map(toPlaywrightCookie);
-  await reloadCookieTabs(tabs);
 
   let actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
-  let actual = new Set(actualCookies.map(cookieKey));
-  let missing = normalized.filter((cookie) => !actual.has(cookieKey(cookie)));
-
-  if (missing.length > 0) {
-    await sleep(1500);
-    await reloadCookieTabs(tabs);
-    actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
-    actual = new Set(actualCookies.map(cookieKey));
-    missing = normalized.filter((cookie) => !actual.has(cookieKey(cookie)));
-
-    if (missing.length > 0) {
-      warn(`Missing hCaptcha cookie(s) after verification: ${missing.map(cookieDiagnosticKey).join(", ")}`);
-      warn(`Visible hCaptcha cookie(s): ${actualCookies.map(cookieDiagnosticKey).join(", ") || "[none]"}`);
-      throw new Error("hCaptcha cookie injection verification failed");
-    }
+  if (hasHcAccessibilityCookie(actualCookies)) {
+    ok("hc_accessibility present before submit");
+    return true;
   }
 
-  ok(`Cookies verified in session (${actualCookies.length} hCaptcha-domain cookies visible).`);
+  warn("hc_accessibility missing before submit; reinjecting once.");
+  await context.addCookies([toPlaywrightCookie(hcAccessibility)]);
+  await sleep(1000);
+
+  actualCookies = await context.cookies(HCAPTCHA_COOKIE_URLS);
+  if (hasHcAccessibilityCookie(actualCookies)) {
+    ok("hc_accessibility present after reinjection");
+    return true;
+  }
+
+  warn(`Visible hCaptcha cookie(s): ${actualCookies.map(cookieDiagnosticKey).join(", ") || "[none]"}`);
+  throw new Error("hc_accessibility cookie missing before submit after reinjection");
 }
 
 // ─── Profile utils ─────────────────────────────────────────────────────────
@@ -503,10 +450,11 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
 
   try {
     step("Starting Chrome...");
+    cleanupProfile(profileDir);
     context = await launchChrome(profileDir);
     ok("Chrome ready");
 
-    await injectHcCookiesWithPriming(context, cookies, "fresh burner profile");
+    await injectHcAccessibilityWithPriming(context, cookies, "fresh burner profile");
 
     page = await context.newPage();
 
@@ -524,16 +472,15 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
 
     step("Clicking Next...");
     await page.locator('button[type="submit"]').filter({ hasText: "Next" }).click();
-    await page.waitForLoadState("networkidle");
-    await humanDelay(1000, 2000);
 
+    step("Waiting for username form...");
     let usernameInput = page.locator('input[name="username"]');
-    if (!(await usernameInput.isVisible({ timeout: 5000 }).catch(() => false))) {
+    if (!(await waitForUsernameForm(page, 30000))) {
       const emailInput = page.locator('input[name="email"][type="email"]');
       const passwordInput = page.locator('input[name="password"][type="password"]');
 
       if (await emailInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-        warn("Username field did not appear; email field is still visible — retrying email/password step once.");
+        warn("Username form did not appear; email form is still visible — retrying email/password step once.");
         await emailInput.click();
         await emailInput.fill("");
         await humanDelay(300, 600);
@@ -549,13 +496,12 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
         }
 
         await page.locator('button[type="submit"]').filter({ hasText: "Next" }).click();
-        await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-        await humanDelay(1000, 2000);
       }
     }
 
     step("Filling username...");
     usernameInput = page.locator('input[name="username"]');
+    await usernameInput.waitFor({ state: "visible", timeout: 30000 });
     await usernameInput.fill(username);
     await humanDelay();
 
@@ -563,8 +509,8 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     await page.locator('input[name="fullname"]').fill(fullname);
     await humanDelay();
 
-    step("Verifying cookies in session...");
-    await verifyHcCookiesWithPriming(context, cookies, "active HF session");
+    step("Checking hCaptcha cookies before submit...");
+    await ensureHcCookiesBeforeSubmit(context, cookies);
     await page.bringToFront().catch(() => {});
 
     step("Checking terms checkbox...");
@@ -578,32 +524,24 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     const createBtn = page.locator('button[type="submit"]').filter({ hasText: "Create Account" });
     const createBtnCount = await createBtn.count();
     if (createBtnCount === 0) throw new Error("Create Account button not found");
-    await createBtn.first().scrollIntoViewIfNeeded();
-    await humanDelay(300, 600);
-    await createBtn.first().click();
-    step("Create Account clicked — waiting for response...");
-    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-    await humanDelay(2000, 3000);
-
-    const hcaptchaDiag = await logHcaptchaDiagnostics(context, page, "after Create Account");
-    if (hcaptchaDiag.challengeVisible) {
-      warn("hCaptcha challenge/puzzle is visible after account submission.");
-      if (hcaptchaDiag.iframeCookieVisible) {
-        warn("The hCaptcha iframe can read accessibility cookies, so this is not a plain injection failure.");
-      } else {
-        warn("The hCaptcha iframe cannot read the accessibility cookie from this context.");
-      }
-
-      await context.close().catch(() => {});
-      cleanupProfile(profileDir);
-      burnInbox();
-      return "CAPTCHA_BLOCKED";
+    const createBtnFirst = createBtn.first();
+    await createBtnFirst.waitFor({ state: "visible", timeout: 10000 });
+    await createBtnFirst.scrollIntoViewIfNeeded();
+    if (!(await createBtnFirst.isEnabled())) {
+      throw new Error("Create Account button is disabled");
     }
+    await humanDelay(300, 600);
+    const beforeSubmitUrl = page.url();
+    await createBtnFirst.click();
+    step(`Create Account clicked — waiting ${CONFIRM_EMAIL_TIMEOUT}s for email...`);
+    await Promise.race([
+      page.waitForURL((url) => url.href !== beforeSubmitUrl, { timeout: CREATE_ACCOUNT_SETTLE_TIMEOUT }).catch(() => {}),
+      sleep(CREATE_ACCOUNT_SETTLE_TIMEOUT),
+    ]);
 
     // ── 4. Confirm Email (with captcha fallback) ─────────────────────────────
     // If no confirmation email arrives, the flow assumes hCaptcha or similar
     // friction blocked the signup and forces a cookie refresh retry.
-    step(`Polling for confirmation email (${CONFIRM_EMAIL_TIMEOUT}s)...`);
     let confirmLink = null;
     try {
       confirmLink = execSync(`timeout ${CONFIRM_EMAIL_TIMEOUT} python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" }).trim();
@@ -625,15 +563,7 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
       }
 
       warn("Refreshing cookies before retry...");
-      step("Running hc_cookie_refresh.js...");
-      try {
-        execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
-        ok("Cookies refreshed. Retrying HF flow...");
-      } catch (e) {
-        fail("Cookie refresh failed.");
-        process.exit(1);
-      }
-
+      refreshCookiesOrExit();
       return "RETRY";
     }
 

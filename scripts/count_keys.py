@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+"""
+count_keys.py — Report how many Hugging Face keys are saved and estimate the
+rough token-buying value of the pool.
+
+Reads data/keys.txt (the file hf_keys.js appends each new token to), counts the
+non-blank lines, and prints a value estimate. The "value" is a back-of-envelope
+figure: each HF key is treated as worth a fixed dollar amount, and that total is
+divided by representative per-1M-token prices for frontier / mid-tier / cheap
+models to show how much output that pool could buy.
+
+These are rough estimates, not accounting — real usage depends on the provider,
+model, caching, reasoning tokens, and inference backend. The last-count cache
+(data/.last_key_count) only exists so the report can show a delta since the
+previous run.
+"""
 
 from pathlib import Path
 import subprocess
@@ -9,10 +24,13 @@ import sys
 KEYS_FILE = Path("/root/api_maker/data/keys.txt")
 LAST_COUNT_FILE = Path("/root/api_maker/data/.last_key_count")
 
-# Assumed value per HF key
+# Assumed dollar value credited to each Hugging Face key. This is a rough
+# stand-in for the monthly inference credits a fresh key unlocks, not a real
+# price — it only exists to turn a key count into a comparable number.
 COST_PER_KEY = 0.10
 
-# Estimated pricing per 1M output tokens
+# Representative pricing per 1M output tokens, used to convert the pool's total
+# value into an estimated token capacity for three model tiers.
 FRONTIER_MODEL_COST = 75.00
 MID_TIER_MODEL_COST = 15.00
 CHEAP_MODEL_COST = 1.10
