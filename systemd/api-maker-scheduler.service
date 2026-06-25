@@ -1,19 +1,20 @@
 [Unit]
-# Runs the long-lived scheduler that repeatedly executes scripts/scheduler.py.
+# Template rendered by setup/installer.py before installation. @PROJECT_DIR@
+# and @PYTHON_BIN@ are replaced with the current checkout and virtualenv.
 Description=API Maker Scheduler
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 # Root is used here because the scheduler launches a visible Chrome session and
-# manages repo-local runtime files under /root/api_maker.
+# manages repo-local runtime files in the checkout.
 Type=simple
 User=root
-WorkingDirectory=/root/api_maker
+WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=/root
-Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=@VENV_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=DISPLAY=:1
-ExecStart=/bin/bash -o pipefail -c 'mkdir -p /root/api_maker/logs && exec /usr/bin/python3 /root/api_maker/scripts/scheduler.py 2>&1 | /usr/bin/tee -a /root/api_maker/logs/keyhive-scanner.log'
+ExecStart=/bin/bash -o pipefail -c 'mkdir -p "@PROJECT_DIR@/logs" && exec @PYTHON_BIN@ "@PROJECT_DIR@/scripts/scheduler.py" 2>&1 | /usr/bin/tee -a "@PROJECT_DIR@/logs/keyhive-scanner.log"'
 Restart=always
 RestartSec=10
 StandardOutput=journal

@@ -2,364 +2,390 @@
 
 # KeyHive
 
-> A command-line automation stack for creating Hugging Face API keys with AgentMail burner inboxes, Gmail-backed hCaptcha cookies, Playwright browser automation, and a systemd-friendly scheduler.
+KeyHive is the working name for this `api_maker` repo. It is a local operator stack for collecting Hugging Face API tokens, storing them in a plain local key pool, and serving those keys through a local OpenAI/Anthropic-compatible proxy with optional NVIDIA fallback.
 
-![Shell](https://img.shields.io/badge/shell-bash-121820?style=for-the-badge&logo=gnubash)
-![Python](https://img.shields.io/badge/python-3.x-121820?style=for-the-badge&logo=python)
-![Node](https://img.shields.io/badge/node.js-required-121820?style=for-the-badge&logo=nodedotjs)
-![Playwright](https://img.shields.io/badge/playwright-browser%20automation-121820?style=for-the-badge&logo=playwright)
+The repo is not a generic SaaS product. It is a Linux-first automation bundle: Bash installer, Python services, Node browser automation, systemd units, static Web UI, and local runtime state. Treat it like operator tooling, not a polished appliance.
 
-KeyHive is the working name for this `api_maker` repo. It wires together a Bash installer, a `keyhive` CLI, Python AgentMail helpers, Node/Playwright browser automation, and a scheduler that repeatedly runs the key creation flow.
+## What It Does
 
-## Quick Links
+- Runs a scanner that creates Hugging Face accounts/tokens through browser automation.
+- Uses AgentMail for temporary inbox creation and Hugging Face confirmation email polling.
+- Uses Gmail-backed hCaptcha accessibility cookies and saved Chrome profiles for the CAPTCHA path.
+- Saves generated Hugging Face tokens to `data/keys.txt`.
+- Runs a local proxy on `127.0.0.1:8787` by default.
+- Routes proxy requests through Hugging Face tokens and can fall back to NVIDIA when no usable HF keys are available.
+- Provides a static FastAPI Web UI for status, logs, settings, and scanner/proxy controls.
+- Provides a `keyhive` CLI wrapper for common scanner, proxy, web, logs, diagnostics, and reporting tasks.
 
-| Need | Go here |
+## Repository Structure
+
+```text
+api_maker/
+├── assets/
+│   └── header.png
+├── bin/
+│   └── keyhive                    # operator CLI wrapper
+├── data/
+│   └── .gitkeep                   # runtime files are ignored
+├── proxy/
+│   ├── keyhive_proxy.py            # FastAPI proxy entrypoint
+│   ├── key_store.py                # HF token pool loading/removal/cooldown
+│   ├── hf_client.py                # Hugging Face router client
+│   ├── openai_compat.py            # OpenAI/Anthropic response shaping
+│   └── fallback/
+│       ├── manager.py              # fallback provider switching logic
+│       └── nvidia_client.py        # NVIDIA fallback client
+├── scripts/
+│   ├── hf_keys.js                  # main HF account/token creation flow
+│   ├── hc_cookie_refresh.js         # hCaptcha cookie refresh flow
+│   ├── browser_strength.js          # prepares Gmail/browser profiles
+│   ├── add_captcha_account.js       # manually add an hCaptcha browser profile
+│   ├── burner_email.py              # AgentMail inbox create/check/burn helper
+│   ├── scheduler.py                 # repeated scanner runner
+│   ├── run_stats.py                 # scanner run counters
+│   └── count_keys.py                # key count/value estimate report
+├── setup/
+│   ├── install.sh                  # bootstrap shell installer
+│   ├── installer.py                # interactive Rich installer
+│   └── requirements.txt            # Python dependencies
+├── systemd/
+│   ├── api-maker-scheduler.service
+│   ├── keyhive-proxy.service
+│   └── keyhive-web.service
+├── web_ui/
+│   ├── back_end/                   # FastAPI app and service facade
+│   └── front_end/                  # static HTML/CSS/JS dashboard
+├── package.json                    # Node deps and checks
+├── package-lock.json
+└── README.md
+```
+
+## Main Files
+
+| Path | Purpose |
 | --- | --- |
-| Install everything | [Quick Setup](#quick-setup) |
-| Configure secrets | [Environment Variables](#environment-variables) |
-| Run one scan | [Commands / CLI Usage](#commands--cli-usage) |
-| Run in the background | [Manual Setup](#manual-setup) |
-| Fix common failures | [Troubleshooting](#troubleshooting) |
-| Understand the moving parts | [How It Works](#how-it-works) |
+| `bin/keyhive` | Main CLI. Resolves the checkout path, wraps systemd, manual scanner runs, logs, status, proxy checks, web checks, diagnostics, and reports. |
+| `setup/install.sh` | Creates `.venv`, installs Python requirements, optionally fills Debian-like package gaps, then launches `setup/installer.py`. |
+| `setup/installer.py` | Interactive installer. Creates runtime folders/files, installs Node deps, installs CLI/systemd units where possible, prompts for secrets, writes `.env`, and configures Claude Code proxy env. |
+| `scripts/hf_keys.js` | Main scanner flow: refresh/check hCaptcha cookies, create AgentMail inbox, sign up to Hugging Face, confirm email, create/write token. |
+| `scripts/hc_cookie_refresh.js` | Refreshes `data/hc_cookie.json` from ready browser profiles and `GMAIL_ACCOUNTS`. |
+| `scripts/browser_strength.js` | Logs Gmail accounts into Chrome profiles and writes readiness metadata under `data/browser_strength/`. |
+| `scripts/add_captcha_account.js` | Opens a visible Chrome session so an operator can manually prepare an hCaptcha accessibility profile. |
+| `scripts/scheduler.py` | Runs `hf_keys.js` 10 times per 90-minute cycle, once every 9 minutes. |
+| `proxy/keyhive_proxy.py` | Local FastAPI proxy with `/health`, `/stats`, `/v1/models`, `/v1/chat/completions`, and `/v1/messages`. |
+| `web_ui/back_end/app.py` | FastAPI Web UI backend and static frontend server. |
+| `web_ui/back_end/services/keyhive_service.py` | Web UI facade around systemd, logs, settings, runtime files, and proxy stats. |
 
-## Features
+## Dependencies
 
-- `keyhive` CLI for manual runs, scheduler control, logs, status, and reporting.
-- AgentMail integration for temporary inbox creation and confirmation-link polling.
-- Gmail account rotation for hCaptcha accessibility cookie refresh.
-- Playwright-powered browser automation for Hugging Face account and token creation.
-- Persistent output in `data/keys.txt`.
-- Cookie cache at `data/hc_cookie.json`, refreshed when missing or stale.
-- Persistent scanner logs in `logs/keyhive-scanner.log`.
-- Run counters in `data/run_stats.json`, split into since-restart and all-time totals.
-- Python report script for counting saved keys and estimating rough token value.
-- Systemd unit included for long-running scheduler deployments.
-- Idempotent installer that preserves existing `.env` values and rewrites only the keys it owns.
+Runtime assumptions are intentionally Linux-heavy:
 
-## How It Works
+- Linux with Bash.
+- Python 3 with `venv`/`pip`.
+- Node.js and npm.
+- Google Chrome Stable available as `google-chrome-stable` for visible browser/profile flows.
+- systemd for background scanner/proxy/web services.
+- A display at `:1` for the browser automation paths that hard-code it.
+- AgentMail API key for burner inboxes.
+- NVIDIA API key if you want fallback provider routing.
+- Dedicated Gmail or compatible browser profiles for hCaptcha accessibility cookies.
 
-1. `scripts/hf_keys.js` checks `data/hc_cookie.json`.
-2. If the cookie is missing or older than 24 hours, it runs `scripts/hc_cookie_refresh.js`.
-3. `hc_cookie_refresh.js` uses `GMAIL_ACCOUNTS` from `.env` to log into hCaptcha accessibility and save usable cookies.
-4. `scripts/burner_email.py` creates an AgentMail inbox using `AGENTMAIL_API_KEY`.
-5. The Playwright flow creates a Hugging Face account, confirms it through AgentMail, creates a write token, and appends the token to `data/keys.txt`.
-6. `scripts/run_stats.py` records each completed run in `data/run_stats.json`.
-7. `scripts/scheduler.py` runs `hf_keys.js` 10 times per 90-minute cycle, every 9 minutes.
-8. `bin/keyhive` wraps the common commands so you do not have to remember script paths like some kind of cursed bash historian.
+Python packages from `setup/requirements.txt`:
 
-## Requirements
+- `httpx`
+- `python-dotenv`
+- `fastapi`
+- `uvicorn[standard]`
+- `rich`
 
-| Requirement | Why |
-| --- | --- |
-| Linux | Installer and service files target Linux paths and systemd-style deployments. |
-| Bash | `setup/install.sh` and `bin/keyhive` are Bash scripts. |
-| Python 3 + pip | AgentMail helper, scheduler, and reporting. |
-| Node.js + npm | Playwright automation scripts. |
-| Playwright | Browser control for hCaptcha and Hugging Face flows. |
-| Google Chrome Stable | Current scripts call `google-chrome-stable` directly. |
-| AgentMail API key | Burner inbox creation. |
-| NVIDIA API key | Local proxy fallback while Hugging Face keys are being collected. |
-| Gmail account credentials | hCaptcha accessibility login flow. |
-| Claude Code | Optional local client configured by the installer. |
+Node packages from `package.json`:
 
-## Quick Setup
+- `dotenv`
+- `playwright`
+- `patchright`
+
+Useful checks:
+
+```bash
+npm run check
+.venv/bin/python -m pytest scripts/test_fallback_state.py scripts/test_tool_compat.py  # if pytest is installed
+```
+
+## Install
 
 From the project root:
 
 ```bash
-cd /root/api_maker
+cd /path/to/api_maker
 chmod +x setup/install.sh
 ./setup/install.sh
 ```
 
-The installer will:
+The installer:
 
-- create `.venv` and install Python requirements;
-- show a guided Rich setup flow;
-- check OS, package manager, Python, Node/npm, Chrome/Chromium, systemd, and project paths;
-- create runtime files under `data/`;
-- install Node dependencies and Playwright Chromium where available;
-- prepare the Web UI folders and runtime paths;
-- install scanner/proxy/Web UI systemd units where permissions allow;
-- prompt for AgentMail, NVIDIA, and Gmail credentials in that order;
-- save `.env` safely with `chmod 600`;
-- configure Claude Code to use the local KeyHive proxy.
+- creates `.venv`;
+- installs Python requirements;
+- installs base Debian packages when `apt-get` is available and packages are missing;
+- installs Node dependencies with `npm install`;
+- runs `npx playwright install chromium` when `npx` exists;
+- creates `data/`, `logs/`, `profiles/google/`, and `profiles/microsoft/`;
+- creates `data/keys.txt`, `data/run_stats.lock`, and `data/hc_cookie.json` if missing;
+- installs `/usr/local/bin/keyhive` as a symlink to `bin/keyhive`;
+- installs scanner/proxy/web systemd units when systemd and permissions allow;
+- prompts for AgentMail, NVIDIA, and Gmail accounts;
+- writes `.env` with `0600` permissions;
+- writes local Claude Code proxy variables into the current shell startup file.
 
-You need:
-
-- AgentMail API key from your AgentMail dashboard/account, starting with `am_us`.
-- NVIDIA API key from NVIDIA Build, starting with `nvapi-`.
-- Dedicated Gmail automation accounts. Gmail 2FA must be off for the current login automation flow.
-
-Then start the scanner and proxy:
+Manual install shape:
 
 ```bash
-keyhive start
-keyhive proxy start
-keyhive web start
-keyhive proxy test
-```
-
-## Manual Setup
-
-Use this if you want to install things yourself or inspect each step.
-
-```bash
-cd ~/api_maker
-mkdir -p data
-touch data/keys.txt
+cd /path/to/api_maker
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r setup/requirements.txt
-```
-
-If `package.json` already exists:
-
-```bash
 npm install
 npx playwright install chromium
-```
-
-If `package.json` does not exist yet, install the actual Node packages used by the repo:
-
-```bash
-npm init -y
-npm install dotenv playwright
-npx playwright install chromium
-```
-
-Make the CLI executable:
-
-```bash
 chmod +x bin/keyhive
 sudo ln -sf "$PWD/bin/keyhive" /usr/local/bin/keyhive
 ```
 
-Optional systemd setup:
+## Environment
 
-```bash
-sudo cp systemd/api-maker-scheduler.service /etc/systemd/system/api-maker-scheduler.service
-sudo cp systemd/keyhive-proxy.service /etc/systemd/system/keyhive-proxy.service
-sudo cp systemd/keyhive-web.service /etc/systemd/system/keyhive-web.service
-sudo systemctl daemon-reload
-sudo systemctl enable api-maker-scheduler.service
-sudo systemctl start api-maker-scheduler.service
-```
+Create `.env` in the project root. The installer is the safer path because it preserves unrelated keys and sets file mode `0600`.
 
-The current Web UI frontend is static HTML/CSS/JS. There is no `web_ui/front_end/package.json` yet, so there are no frontend Node dependencies to install for it. The Web UI backend uses the existing Python requirements from `setup/requirements.txt`.
+Required or commonly used values:
 
-## Environment Variables
-
-Create `.env` in the project root. The installer does this interactively and safely.
-
-| Variable | Required | Used by | Format |
+| Variable | Required | Default | Used by |
 | --- | --- | --- | --- |
-| `AGENTMAIL_API_KEY` | Yes | `scripts/burner_email.py` | Must start with `am_us` |
-| `NVDA_KEY` | Yes | Proxy fallback | Must start with `nvapi-` |
-| `GMAIL_ACCOUNTS` | Yes | `scripts/hc_cookie_refresh.js` | Raw JSON array |
-| `KEYHIVE_PROXY_HOST` | No | Proxy | Defaults to `127.0.0.1` |
-| `KEYHIVE_PROXY_PORT` | No | Proxy | Defaults to `8787` |
-| `KEYHIVE_PROXY_DEFAULT_PROVIDER` | No | Proxy | Defaults to `hf` |
-| `KEYHIVE_PROXY_FALLBACK_PROVIDER` | No | Proxy | Defaults to `nvidia` |
-| `KEYHIVE_FALLBACK_ENABLED` | No | Proxy fallback | Defaults to `1` |
-| `KEYHIVE_FALLBACK_PROVIDER` | No | Proxy fallback | Defaults to `nvidia` |
-| `KEYHIVE_FALLBACK_ENTER_AT` | No | Proxy fallback | Defaults to `0` |
-| `KEYHIVE_FALLBACK_EXIT_AT` | No | Proxy fallback | Defaults to `10` |
-| `KEYHIVE_HF_BASE_URL` | No | Proxy | Defaults to `https://router.huggingface.co/v1` |
-| `KEYHIVE_NVIDIA_BASE_URL` | No | Proxy fallback | Defaults to `https://integrate.api.nvidia.com/v1/chat/completions` |
-| `KEYHIVE_PROXY_DEFAULT_MODEL` | No | Proxy | Defaults to `zai-org/GLM-5.2` |
-| `KEYHIVE_PROXY_NVIDIA_MODEL` | No | Proxy | Defaults to `moonshotai/kimi-k2.6` |
-| `DEBUG` | No | Node scripts | Any non-empty value enables extra logs |
-| `KEYHIVE_SERVICE` | No | `bin/keyhive` | Overrides `api-maker-scheduler.service` |
-| `KEYHIVE_WEB_HOST` | No | Web UI | Defaults to `0.0.0.0` |
-| `KEYHIVE_WEB_PORT` | No | Web UI | Defaults to `8080` |
-| `KEYHIVE_WEB_SERVICE` | No | `bin/keyhive` | Overrides `keyhive-web.service` |
+| `AGENTMAIL_API_KEY` | Yes | none | `scripts/burner_email.py` |
+| `GMAIL_ACCOUNTS` | For automated profile prep | none | `browser_strength.js`, `hc_cookie_refresh.js` |
+| `NVDA_KEY` | For NVIDIA fallback | none | `proxy/fallback/nvidia_client.py` |
+| `KEYHIVE_KEYS_FILE` | No | `<project>/data/keys.txt` | proxy |
+| `KEYHIVE_PROXY_HOST` | No | `127.0.0.1` | proxy |
+| `KEYHIVE_PROXY_PORT` | No | `8787` | proxy |
+| `KEYHIVE_PROXY_DEFAULT_PROVIDER` | No | `hf` | proxy/settings |
+| `KEYHIVE_PROXY_FALLBACK_PROVIDER` | No | `nvidia` | proxy/settings |
+| `KEYHIVE_PROXY_RELOAD_SECONDS` | No | `5` | proxy key reload loop |
+| `KEYHIVE_PROXY_REQUEST_TIMEOUT` | No | `300` | proxy upstream requests |
+| `KEYHIVE_PROXY_MAX_RETRIES` | No | `2` | proxy upstream retries |
+| `KEYHIVE_PROXY_MAX_KEY_FAILOVERS` | No | `3` | per-request key failover cap |
+| `KEYHIVE_PROXY_DEBUG` | No | `0` | proxy logging |
+| `KEYHIVE_FALLBACK_ENABLED` | No | `1` | fallback manager |
+| `KEYHIVE_FALLBACK_PROVIDER` | No | `nvidia` | fallback manager |
+| `KEYHIVE_FALLBACK_ENTER_AT` | No | `0` | switch to fallback at/below this usable HF key count |
+| `KEYHIVE_FALLBACK_EXIT_AT` | No | `10` | switch back to HF at/above this usable HF key count |
+| `KEYHIVE_HF_BASE_URL` | No | `https://router.huggingface.co/v1` | HF client |
+| `KEYHIVE_NVIDIA_BASE_URL` | No | `https://integrate.api.nvidia.com/v1/chat/completions` | NVIDIA client |
+| `KEYHIVE_PROXY_DEFAULT_MODEL` | No | `zai-org/GLM-5.2` | proxy |
+| `KEYHIVE_PROXY_NVIDIA_MODEL` | No | `moonshotai/kimi-k2.6` | NVIDIA fallback |
+| `KEYHIVE_SERVICE` | No | `api-maker-scheduler.service` | CLI/Web UI |
+| `KEYHIVE_PROXY_SERVICE` | No | `keyhive-proxy.service` | CLI/Web UI |
+| `KEYHIVE_WEB_SERVICE` | No | `keyhive-web.service` | CLI |
+| `KEYHIVE_PROXY_URL` | No | `http://127.0.0.1:8787` | CLI/Web UI |
+| `KEYHIVE_WEB_URL` | No | `http://127.0.0.1:8080` | CLI |
+| `KEYHIVE_WEB_HOST` | No | `0.0.0.0` | Web UI |
+| `KEYHIVE_WEB_PORT` | No | `8080` | Web UI |
+| `KEYHIVE_WEB_PASSWORD` | No | none | login check only |
+| `KEYHIVE_WEB_AUTH_TOKEN` | No | none | login check only |
+| `BROWSER_STRENGTH_CDP_PORT` | No | `9333` | `browser_strength.js` |
+| `DEBUG` | No | empty | Node script verbose logs |
 
-Example shape only:
+Example shape:
 
 ```bash
 AGENTMAIL_API_KEY=am_us_your_key_here
 NVDA_KEY=nvapi-your_key_here
-GMAIL_ACCOUNTS=[{"email":"person@gmail.com","password":"app-or-account-password"}]
+GMAIL_ACCOUNTS=[{"email":"person@gmail.com","password":"password-or-app-secret"}]
+KEYHIVE_PROXY_HOST=127.0.0.1
+KEYHIVE_PROXY_PORT=8787
 ```
 
-Do not commit `.env`. It contains live credentials. The repo already ignores it.
+Do not commit `.env`. It contains live credentials.
 
-## Commands / CLI Usage
+## Setup Flow
+
+1. Run `./setup/install.sh`.
+2. Provide the AgentMail API key.
+3. Provide the NVIDIA key if using fallback.
+4. Add Gmail accounts when prompted, or prepare browser profiles manually.
+5. Start the proxy:
 
 ```bash
-keyhive help
+keyhive proxy start
+keyhive proxy status
+keyhive proxy test
 ```
+
+6. Prepare browser strength profiles if the cookie refresh flow needs them:
+
+```bash
+node scripts/browser_strength.js
+```
+
+7. Start the scanner:
+
+```bash
+keyhive start
+keyhive logs -f
+```
+
+8. Start the Web UI if you need the dashboard:
+
+```bash
+keyhive web start
+keyhive web status
+```
+
+## `keyhive` CLI
+
+Run `keyhive` with no arguments to open the interactive SSH-friendly menu.
+
+Scanner commands:
 
 | Command | What it does |
 | --- | --- |
-| `keyhive runs=1` | Run `scripts/hf_keys.js` once. |
-| `keyhive runs 3` | Run `scripts/hf_keys.js` three times. |
-| `keyhive start` | Start the systemd scheduler service. |
-| `keyhive stop` | Stop the scheduler service. |
-| `keyhive restart` | Restart the scheduler service and reset since-restart run counters. |
-| `keyhive status` | Show service state, key count, cookie age, since-restart counters, and all-time counters. |
-| `keyhive logs` | Show recent service logs. |
-| `keyhive logs -f` | Follow service logs. |
-| `keyhive logs 200` | Show the last 200 service log lines. |
+| `keyhive start` | Start `api-maker-scheduler.service` or `KEYHIVE_SERVICE`. |
+| `keyhive stop` | Stop the scanner service. |
+| `keyhive restart` | Reset since-restart stats and restart the scanner service. |
+| `keyhive status` | Show scanner service state, key count, cookie age, and run stats. |
+| `keyhive logs` | Show recent scanner journal logs. |
+| `keyhive logs -f` | Follow scanner logs. |
+| `keyhive logs 200` | Show last 200 scanner log lines. |
+| `keyhive runs=1` | Run `scripts/hf_keys.js` once outside systemd. |
+| `keyhive runs 3` | Run `scripts/hf_keys.js` three times outside systemd. |
 | `keyhive report` | Run `scripts/count_keys.py`. |
-| `keyhive proxy start` | Start the local OpenAI-compatible proxy. |
-| `keyhive proxy stop` | Stop the local proxy. |
-| `keyhive proxy restart` | Restart the local proxy. |
-| `keyhive proxy status` | Show systemd status and `/health`. |
-| `keyhive proxy stats` | Show `/stats`. |
-| `keyhive proxy fallback` | Show fallback provider status. |
-| `keyhive proxy test` | Send a tiny local chat completion request. |
-| `keyhive web start` | Start the public Web UI service on port `8080`. |
+
+Proxy commands:
+
+| Command | What it does |
+| --- | --- |
+| `keyhive proxy start` | Start `keyhive-proxy.service` or `KEYHIVE_PROXY_SERVICE`. |
+| `keyhive proxy stop` | Stop the proxy service. |
+| `keyhive proxy restart` | Restart the proxy service. |
+| `keyhive proxy status` | Show systemd state plus `/health`. |
+| `keyhive proxy logs` | Show recent proxy journal logs. |
+| `keyhive proxy logs -f` | Follow proxy logs. |
+| `keyhive proxy stats` | Fetch `/stats`. |
+| `keyhive proxy fallback` | Show current fallback/provider status from `/stats`. |
+| `keyhive proxy test` | Send a small local chat completion request. |
+
+Web commands:
+
+| Command | What it does |
+| --- | --- |
+| `keyhive web start` | Start `keyhive-web.service` or `KEYHIVE_WEB_SERVICE`. |
 | `keyhive web stop` | Stop the Web UI service. |
 | `keyhive web restart` | Restart the Web UI service. |
-| `keyhive web status` | Show Web UI service status and `/api/status`. |
-| `keyhive web logs` | Show recent Web UI service logs. |
-| `keyhive doctor` | Run diagnostics for env, deps, services, proxy, and Claude config. |
-| `keyhive tree` | Show the stripped-down repo layout. |
+| `keyhive web status` | Show systemd state plus `/api/status`. |
+| `keyhive web logs` | Show recent Web UI journal logs. |
 
-Direct script commands:
+Other commands:
 
-```bash
-node scripts/hc_cookie_refresh.js
-node scripts/hf_keys.js
-.venv/bin/python scripts/burner_email.py create
-.venv/bin/python scripts/burner_email.py check
-.venv/bin/python scripts/burner_email.py burn
-.venv/bin/python scripts/count_keys.py
-```
-
-Runtime files are local-only and ignored by Git:
-
-| File | Purpose |
+| Command | What it does |
 | --- | --- |
-| `data/keys.txt` | Generated Hugging Face tokens. |
-| `data/hc_cookie.json` | Cached hCaptcha accessibility cookies. |
-| `data/run_stats.json` | Scanner run counters and failure buckets. |
-| `data/run_stats.lock` | File lock used for safe stats updates. |
-| `logs/keyhive-scanner.log` | Persistent copy of scanner systemd output. |
+| `keyhive doctor` | Check env, dependencies, runtime files, services, proxy, and Claude config. |
+| `keyhive tree` | Print a stripped-down repo layout. |
+| `keyhive help` | Print CLI help. |
 
-Diagnostics:
+## Scanner
+
+The scanner is `scripts/hf_keys.js`. Its rough flow is:
+
+1. Read `data/hc_cookie.json`.
+2. Refresh cookies with `scripts/hc_cookie_refresh.js` when missing, stale, unreadable, or expired.
+3. Create a burner inbox with `scripts/burner_email.py create`.
+4. Use Patchright/Chromium to run the Hugging Face signup flow.
+5. Poll AgentMail for the confirmation link.
+6. Create a Hugging Face token.
+7. Append the token to `data/keys.txt`.
+8. Burn the temporary inbox.
+
+Manual run:
 
 ```bash
-keyhive doctor
-keyhive tree
+keyhive runs=1
+DEBUG=1 keyhive runs=1
 ```
 
-## KeyHive Proxy
+Direct run:
 
-KeyHive Proxy exposes a local AI API and forwards chat requests to Hugging Face using tokens from `data/keys.txt`. It binds to `127.0.0.1` by default, watches `data/keys.txt`, and reloads new scanner-generated keys without restarting. If Hugging Face keys are not ready and `NVDA_KEY` exists, it can fall back to NVIDIA.
+```bash
+node scripts/hf_keys.js
+```
 
-Base URL:
+The scheduler runs `hf_keys.js` 10 times per 90-minute cycle, one run every 9 minutes:
+
+```bash
+python3 scripts/scheduler.py
+```
+
+Under systemd, scanner output is also appended to:
+
+```text
+logs/keyhive-scanner.log
+```
+
+## Proxy
+
+The proxy is `proxy/keyhive_proxy.py`, served by FastAPI/Uvicorn.
+
+Default base URL:
 
 ```text
 http://127.0.0.1:8787
 ```
 
-Control it:
+Endpoints:
 
-```bash
-keyhive proxy start
-keyhive proxy status
-keyhive proxy fallback
-keyhive proxy stats
-keyhive proxy logs -f
-keyhive proxy stop
-```
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Basic proxy health and current provider. |
+| `GET /stats` | Key pool stats, provider/fallback status, model/config values. |
+| `GET /v1/models` | OpenAI-style model list with the configured default model. |
+| `POST /v1/chat/completions` | OpenAI-compatible chat completions. Supports streaming. |
+| `POST /v1/messages` | Anthropic-shaped messages route for Claude Code compatibility. |
 
-OpenAI-compatible endpoint:
-
-```text
-POST /v1/chat/completions
-```
-
-Anthropic-compatible endpoint for Claude Code:
-
-```text
-POST /v1/messages
-```
-
-Non-streaming example:
+Example:
 
 ```bash
 curl -sS http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "default",
-    "messages": [{"role": "user", "content": "Say hello from KeyHive proxy in one sentence."}],
+    "messages": [{"role": "user", "content": "Say hello from KeyHive."}],
     "max_tokens": 64,
     "stream": false
   }' | python3 -m json.tool
 ```
 
-Streaming example:
+The proxy:
 
-```bash
-curl -N http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "default",
-    "messages": [{"role": "user", "content": "Stream a short KeyHive greeting."}],
-    "max_tokens": 64,
-    "stream": true
-  }'
-```
+- reads tokens from `data/keys.txt`;
+- deduplicates tokens on load;
+- round-robins usable keys;
+- cools keys down on `429`;
+- removes keys from `data/keys.txt` on upstream `401`, `403`, or exhausted-credit `402`;
+- switches to NVIDIA fallback when fallback is enabled, `NVDA_KEY` is available, and usable HF keys are at/below `KEYHIVE_FALLBACK_ENTER_AT`;
+- switches back to HF when usable HF keys reach `KEYHIVE_FALLBACK_EXIT_AT`.
 
-Proxy environment defaults:
+Do not bind this proxy publicly unless you add real auth and firewalling. Local-only is the sane default.
 
-```bash
-KEYHIVE_PROXY_HOST=127.0.0.1
-KEYHIVE_PROXY_PORT=8787
-KEYHIVE_KEYS_FILE=/root/api_maker/data/keys.txt
-KEYHIVE_PROXY_DEFAULT_PROVIDER=hf
-KEYHIVE_PROXY_FALLBACK_PROVIDER=nvidia
-KEYHIVE_FALLBACK_ENABLED=1
-KEYHIVE_FALLBACK_PROVIDER=nvidia
-KEYHIVE_FALLBACK_ENTER_AT=0
-KEYHIVE_FALLBACK_EXIT_AT=10
-KEYHIVE_HF_BASE_URL=https://router.huggingface.co/v1
-KEYHIVE_NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1/chat/completions
-KEYHIVE_PROXY_DEFAULT_MODEL=zai-org/GLM-5.2
-KEYHIVE_PROXY_NVIDIA_MODEL=moonshotai/kimi-k2.6
-```
+## Web UI
 
-Do not bind this to `0.0.0.0` unless you add real auth and firewalling. Local-only is the sane default.
+The Web UI is `web_ui/back_end/app.py` plus static files in `web_ui/front_end/`.
 
-## KeyHive Web UI
-
-KeyHive Web UI is a small FastAPI app that serves a static black-background dashboard and same-origin `/api/*` endpoints. It runs publicly on:
+Default URL:
 
 ```text
-http://YOUR_SERVER_IP:8080
-```
-
-The Web UI currently has a login-page foundation, but the dashboard and API routes are not protected yet. That is temporary and unsafe for long-term public exposure. Put it behind auth and firewall rules before treating it as anything other than an operator-only control surface.
-
-Install and run through systemd:
-
-```bash
-sudo cp systemd/keyhive-web.service /etc/systemd/system/keyhive-web.service
-sudo systemctl daemon-reload
-keyhive web start
-keyhive web status
+http://SERVER_IP:8080
 ```
 
 Manual run:
 
 ```bash
-cd /root/api_maker
-python3 -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
+cd /path/to/api_maker
+.venv/bin/python -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
 ```
-
-Pages:
-
-- Login: initial password/token form for the upcoming auth phase.
-- Dashboard: scanner/proxy/key/cookie/provider/run overview.
-- Scanner: scanner service state and start/stop/restart controls.
-- Proxy: proxy health, provider/fallback stats, and start/stop/restart controls.
-- Logs: scanner and proxy logs with selectable line counts, SSE live streaming, pause/resume, copy, and jump-to-latest.
-- Stats: since-restart runs, all-time runs, failure points, key stats, and proxy stats.
-- Settings: boxed runtime sections plus whitelisted editable proxy/model settings. Model/provider changes are written to the safe config sources and require a proxy restart.
 
 Useful API checks:
 
@@ -369,126 +395,209 @@ curl http://127.0.0.1:8080/api/status
 curl http://127.0.0.1:8080/api/scanner/status
 curl http://127.0.0.1:8080/api/proxy/status
 curl http://127.0.0.1:8080/api/proxy/stats
+curl http://127.0.0.1:8080/api/proxy/fallback
+curl http://127.0.0.1:8080/api/keys/stats
+curl http://127.0.0.1:8080/api/runs/stats
 curl http://127.0.0.1:8080/api/logs/scanner
+curl http://127.0.0.1:8080/api/logs/proxy
+curl http://127.0.0.1:8080/api/failures/recent
 curl http://127.0.0.1:8080/api/settings
 ```
 
-Claude Code shell config is managed by the installer:
+Important: the login route validates `KEYHIVE_WEB_PASSWORD` or `KEYHIVE_WEB_AUTH_TOKEN`, but route protection is not wired up. The API reports `protects_ui: false`. Do not expose this UI to the internet and pretend a login page is security. That is how dashboards become incident reports.
+
+## Systemd
+
+Unit files live in `systemd/`.
+
+| Unit | Purpose |
+| --- | --- |
+| `api-maker-scheduler.service` | Runs `scripts/scheduler.py` and tees output to `logs/keyhive-scanner.log`. |
+| `keyhive-proxy.service` | Runs `python -m proxy.keyhive_proxy`. |
+| `keyhive-web.service` | Runs `uvicorn web_ui.back_end.app:app`. |
+
+The files in this directory are templates with `@PROJECT_DIR@`, `@PYTHON_BIN@`, and `@VENV_BIN@` placeholders. The installer renders them into absolute-path service files under `/etc/systemd/system`, which is what systemd requires.
+
+Install/reload through the installer. Copying these templates directly will not work:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_API_KEY=sk-ant-api03-R2D2C3POfakeDemoKeyOnlyDoNotUse1234567890abcdefABCDEFfakeKEYexample999999999999AA
+./setup/install.sh
 ```
 
-## NVIDIA Fallback
-
-KeyHive normally routes through Hugging Face keys from `data/keys.txt`. If there are `0` usable Hugging Face keys, the proxy can switch to NVIDIA fallback using `NVDA_KEY`. It switches back to Hugging Face only after the pool reaches `10` usable keys, which prevents provider flapping when only one or two keys appear.
+Start services:
 
 ```bash
-keyhive proxy fallback
-keyhive proxy stats
-keyhive proxy logs -f
+keyhive start
+keyhive proxy start
+keyhive web start
 ```
+
+Logs:
+
+```bash
+journalctl -u api-maker-scheduler.service -b -f -o cat
+journalctl -u keyhive-proxy.service -b -f -o cat
+journalctl -u keyhive-web.service -b -f -o cat
+```
+
+The installer performs this rendering and reloads systemd when permissions allow.
+
+## Logs
+
+| Location | Purpose |
+| --- | --- |
+| `logs/keyhive-scanner.log` | Flat scanner log written by the scheduler service. |
+| `logs/chrome-9333.log` | Chrome logs from profile/cookie flows. |
+| `journalctl -u api-maker-scheduler.service` | Scanner service journal. |
+| `journalctl -u keyhive-proxy.service` | Proxy journal. |
+| `journalctl -u keyhive-web.service` | Web UI journal. |
+| `logs/fail_hf_flow.png` | Scanner failure screenshot path used by `hf_keys.js`. |
+
+The Web UI masks common email and Hugging Face token patterns before returning log lines to the browser. That is a safety net, not permission to dump secrets into logs.
+
+## Data
+
+Runtime data is local and ignored by Git.
+
+| Path | Purpose | Sensitive |
+| --- | --- | --- |
+| `data/keys.txt` | Generated Hugging Face tokens; proxy key pool. | Yes |
+| `data/hc_cookie.json` | hCaptcha accessibility cookies. | Yes |
+| `data/run_stats.json` | Scanner run counters and failure buckets. | No secrets expected |
+| `data/run_stats.lock` | File lock for stats writes. | No |
+| `data/.agentmail_state.json` | Current AgentMail inbox id/address. | Potentially |
+| `data/.last_key_count` | Previous key count used by reports. | No |
+| `data/browser_strength/` | Browser profile readiness metadata, storage state, cookies. | Yes |
+
+## Profiles
+
+Browser profiles live under:
+
+```text
+profiles/google/
+profiles/microsoft/
+```
+
+`browser_strength.js` creates Gmail-backed Chrome profiles and readiness metadata. `hc_cookie_refresh.js` reuses ready profiles and can also discover profile directories on disk.
+
+Prepare profiles from `.env` Gmail accounts:
+
+```bash
+node scripts/browser_strength.js
+```
+
+Prepare one account:
+
+```bash
+node scripts/browser_strength.js --email person@gmail.com
+```
+
+Force re-check:
+
+```bash
+node scripts/browser_strength.js --force
+```
+
+Manually add an hCaptcha accessibility profile:
+
+```bash
+node scripts/add_captcha_account.js --email person@gmail.com
+```
+
+Profiles contain cookies, sessions, history, and browser state. They are ignored by Git for a reason. Do not ship them around like harmless config.
 
 ## Troubleshooting
 
-### Claude Code Shows Hugging Face `402 Payment Required`
+| Problem | Check/Fix |
+| --- | --- |
+| `Missing AGENTMAIL_API_KEY in .env` | Re-run `./setup/install.sh` or add `AGENTMAIL_API_KEY=...` to `.env`. |
+| `GMAIL_ACCOUNTS parse error` | `GMAIL_ACCOUNTS` must be valid JSON, not shell-ish almost-JSON. Use the installer if in doubt. |
+| Gmail login stalls or asks for verification | Use dedicated accounts. The scripts pause for manual action; they do not bypass 2FA/CAPTCHA. |
+| `google-chrome-stable` missing | Install Google Chrome Stable or update the scripts; several flows call it directly. |
+| `CDP never came alive` | Check `DISPLAY`, Chrome install, port `9333`, and `logs/chrome-9333.log`. |
+| `node not found` or `npm not found` | Install Node/npm, then run `npm install`. |
+| `Cannot find module 'patchright'` | Run `npm install` from the project root. |
+| Python imports missing | Run `.venv/bin/python -m pip install -r setup/requirements.txt`. |
+| Scanner service missing | Install/copy the systemd unit, run `sudo systemctl daemon-reload`, then retry. |
+| Scanner runs but no keys appear | Run `DEBUG=1 keyhive runs=1`, then inspect `logs/keyhive-scanner.log`, `logs/fail_hf_flow.png`, and browser/profile state. |
+| Cookie keeps refreshing | Inspect `data/hc_cookie.json`, profile readiness under `data/browser_strength/`, and Gmail/hCaptcha availability. |
+| Proxy returns `503 no usable keys` | `data/keys.txt` is empty, all keys are cooling down, or fallback is unavailable. |
+| Proxy uses NVIDIA | Expected when usable HF keys are at/below the fallback enter threshold and `NVDA_KEY` is valid. |
+| Proxy returns `504 upstream request timed out` | Upstream provider timed out; inspect proxy logs and `KEYHIVE_PROXY_REQUEST_TIMEOUT`. |
+| Claude Code is not using the proxy | Source the shell file the installer edited, then check `ANTHROPIC_BASE_URL`. |
+| Web UI login succeeds but UI is still public | Correct. Login validation exists, route protection does not. Firewall it. |
 
-This means the active Hugging Face key has depleted its included monthly Inference Provider credits. KeyHive treats that key as exhausted, removes it from `data/keys.txt`, reloads the live pool, and uses NVIDIA fallback when no usable Hugging Face keys remain.
-
-Useful checks:
+Diagnostics:
 
 ```bash
-keyhive proxy fallback
-keyhive proxy stats
-keyhive proxy logs -f
 keyhive doctor
+keyhive status
+keyhive proxy status
+keyhive proxy stats
+keyhive proxy fallback
+keyhive web status
 ```
 
-| Problem | Fix |
-| --- | --- |
-| `Missing AGENTMAIL_API_KEY in .env` | Re-run `./setup/install.sh` or add `AGENTMAIL_API_KEY=...` manually. |
-| `GMAIL_ACCOUNTS parse error` | Your JSON is invalid. Re-run the installer; it writes JSON safely. |
-| Gmail login fails | Gmail 2FA must be disabled for this automation path. That is ugly, but it is how this flow is currently built. |
-| `google-chrome-stable` not found | Install Google Chrome Stable or update the scripts to launch Playwright's bundled Chromium. |
-| `node not found` / `npm not found` | Install Node.js and npm, then run `npm install`. |
-| `playwright` module missing | Run `npm install dotenv playwright`. |
-| `python-dotenv` or `httpx` missing | Run `.venv/bin/python -m pip install -r setup/requirements.txt`. |
-| Systemd commands fail | Copy the unit into `/etc/systemd/system/`, run `systemctl daemon-reload`, then retry. |
-| Proxy returns `503 no usable keys` | `data/keys.txt` is empty, invalid, or all keys are cooling down. |
-| Proxy falls back to NVIDIA | Expected while `data/keys.txt` is empty or all Hugging Face keys are cooling down. |
-| Proxy returns `504 upstream request timed out` | Hugging Face did not answer within `KEYHIVE_PROXY_REQUEST_TIMEOUT`. |
-| Claude Code does not use the proxy | Run `source ~/.bashrc`, `source ~/.zshrc`, or the file printed by the installer. |
-| Cookie keeps refreshing | Check `data/hc_cookie.json` permissions and Gmail account availability. |
-| No keys appear in `data/keys.txt` | Run `DEBUG=1 keyhive runs=1` and inspect screenshots/logs in `/root/fail_*.png` and `/root/chrome-*.log`. |
+## Uninstall / Reset
 
-## Security Notes
+Stop services:
 
-- `.env` contains AgentMail and Gmail credentials; keep it at `chmod 600`.
-- `data/keys.txt` contains generated Hugging Face tokens; treat it as secret material.
-- The installer never prints API keys or Gmail passwords back to the terminal.
-- Only automate accounts and services you are authorized to use. Provider terms and anti-abuse systems are not decorative wallpaper.
-- Gmail 2FA being disabled is a real security downgrade. Use dedicated automation accounts, not personal inboxes.
-- Rotate credentials immediately if this machine, `.env`, logs, screenshots, or runtime data are exposed.
+```bash
+keyhive stop || true
+keyhive proxy stop || true
+keyhive web stop || true
+```
 
-## File Structure
+Remove installed systemd units:
+
+```bash
+sudo rm -f /etc/systemd/system/api-maker-scheduler.service
+sudo rm -f /etc/systemd/system/keyhive-proxy.service
+sudo rm -f /etc/systemd/system/keyhive-web.service
+sudo systemctl daemon-reload
+```
+
+Remove CLI symlink:
+
+```bash
+sudo rm -f /usr/local/bin/keyhive
+```
+
+Reset scanner/proxy runtime data, keeping dependencies:
+
+```bash
+rm -f data/keys.txt data/hc_cookie.json data/run_stats.json data/run_stats.lock
+rm -f data/.agentmail_state.json data/.last_key_count
+rm -rf data/browser_strength profiles logs
+mkdir -p data logs profiles/google profiles/microsoft
+touch data/keys.txt data/run_stats.lock
+printf '[]\n' > data/hc_cookie.json
+```
+
+Full local cleanup:
+
+```bash
+rm -rf .venv node_modules data/browser_strength profiles logs
+rm -f data/keys.txt data/hc_cookie.json data/run_stats.json data/run_stats.lock
+rm -f data/.agentmail_state.json data/.last_key_count
+```
+
+If the installer configured Claude Code, remove the block between these markers in your shell startup file:
 
 ```text
-api_maker/
-├── assets/
-│   └── header.png
-├── bin/
-│   └── keyhive
-├── data/
-│   ├── .gitkeep
-│   ├── hc_cookie.json        # runtime, ignored
-│   ├── keys.txt              # runtime, ignored
-│   └── run_stats.json        # runtime, ignored
-├── logs/
-│   └── keyhive-scanner.log   # runtime, ignored
-├── proxy/
-│   ├── __init__.py
-│   ├── fallback/
-│   │   ├── __init__.py
-│   │   ├── manager.py
-│   │   └── nvidia_client.py
-│   ├── hf_client.py
-│   ├── key_store.py
-│   ├── keyhive_proxy.py
-│   └── openai_compat.py
-├── scripts/
-│   ├── burner_email.py
-│   ├── count_keys.py
-│   ├── hc_cookie_refresh.js
-│   ├── hf_keys.js
-│   ├── run_stats.py
-│   ├── scheduler.py
-│   └── test_fallback_state.py
-├── setup/
-│   ├── install.sh
-│   ├── installer.py
-│   └── requirements.txt
-├── systemd/
-│   ├── api-maker-scheduler.service
-│   ├── keyhive-web.service
-│   └── keyhive-proxy.service
-├── web_ui/
-│   ├── WEB_UI_PLAN.md
-│   ├── back_end/
-│   │   ├── app.py
-│   │   ├── README.md
-│   │   └── services/
-│   └── front_end/
-│       ├── app.js
-│       ├── index.html
-│       └── styles.css
-├── .env                      # local secrets, ignored
-└── .gitignore
+# >>> keyhive proxy env >>>
+# <<< keyhive proxy env <<<
 ```
 
-## Credits / Notes
+Do not run reset commands casually on a machine holding useful keys or browser sessions. They delete local state.
 
-- AgentMail handles temporary inbox creation and message polling.
-- Playwright handles browser automation.
-- Hugging Face token creation is performed through the browser flow in `scripts/hf_keys.js`.
-- The project paths currently assume `/root/api_maker` in several scripts and the systemd unit. The installer resolves its own root dynamically, but the runtime scripts still use the existing absolute paths in places. That should be normalized if this repo needs to move between machines.
+## Safety Notes
+
+- `.env`, `data/keys.txt`, `data/hc_cookie.json`, `data/browser_strength/`, and `profiles/` contain credential/session material.
+- Keep `.env` at `0600`.
+- Never commit runtime state, browser profiles, cookies, screenshots, or logs containing secrets.
+- Use dedicated automation accounts. Do not use personal Gmail.
+- The Web UI is not protected by real route auth yet.
+- The proxy has no built-in client auth. Bind it to localhost unless you add proper controls.
+- Provider terms, quotas, anti-abuse systems, and account rules still apply. Automation does not magically make them optional.
+- If this host or repo runtime state leaks, rotate AgentMail/NVIDIA/Gmail/Hugging Face credentials immediately.

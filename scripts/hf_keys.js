@@ -11,7 +11,7 @@
 // launch flags (--enable-automation, --disable-extensions, etc.) for us.
 // Same API as playwright, so the rest of the file is unchanged.
 const { chromium } = require("patchright");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
@@ -23,8 +23,10 @@ require("dotenv").config({ path: path.join(ROOT_DIR, ".env") });
 // ensureCookies() consumes before any signup attempt begins.
 const COOKIE_PATH    = path.join(ROOT_DIR, "data", "hc_cookie.json");
 const KEYS_PATH      = path.join(ROOT_DIR, "data", "keys.txt");
+const FAILURE_SCREENSHOT = path.join(ROOT_DIR, "logs", "fail_hf_flow.png");
 const REFRESH_SCRIPT = path.join(ROOT_DIR, "scripts", "hc_cookie_refresh.js");
 const BURNER_SCRIPT  = path.join(ROOT_DIR, "scripts", "burner_email.py");
+const PYTHON_BIN = process.env.KEYHIVE_PYTHON_BIN || (fs.existsSync(path.join(ROOT_DIR, ".venv", "bin", "python")) ? path.join(ROOT_DIR, ".venv", "bin", "python") : "python3");
 const HCAPTCHA_LOGIN_URL = "https://dashboard.hcaptcha.com/login?type=accessibility";
 const HCAPTCHA_COOKIE_URLS = [
   "https://hcaptcha.com",
@@ -151,7 +153,7 @@ async function ensureCookies() {
     // missing or stale enough to be suspicious.
     step("Running hc_cookie_refresh.js...");
     try {
-      execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
+      execFileSync("node", [REFRESH_SCRIPT], { stdio: "inherit" });
       ok("Cookie refreshed.");
     } catch (e) {
       fail("Failed to refresh cookie.");
@@ -177,7 +179,7 @@ async function ensureCookies() {
 function getBurnerEmail() {
   step("Getting burner email...");
   try {
-    const email = execSync(`python3 ${BURNER_SCRIPT} create`, { encoding: "utf-8" }).trim();
+    const email = execFileSync(PYTHON_BIN, [BURNER_SCRIPT, "create"], { encoding: "utf-8" }).trim();
     if (!email) throw new Error("Script returned empty email");
     ok(`Burner email: ${email}`);
     return email;
@@ -192,7 +194,7 @@ function getConfirmationLink() {
   // visible, then returns the link for the browser session to open.
   step("Waiting for confirmation email...");
   try {
-    const output = execSync(`python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" });
+    const output = execFileSync(PYTHON_BIN, [BURNER_SCRIPT, "check"], { encoding: "utf-8" });
     const match = output.match(/https:\/\/huggingface\.co\/[^\s"'<>]+/);
     if (match) {
       ok(`Found confirmation link.`);
@@ -213,7 +215,7 @@ function burnInbox() {
   // dead mailboxes across retries.
   step("Burning burner email inbox...");
   try {
-    execSync(`python3 ${BURNER_SCRIPT} burn`, { encoding: "utf-8" });
+    execFileSync(PYTHON_BIN, [BURNER_SCRIPT, "burn"], { encoding: "utf-8" });
     ok("Inbox burned.");
   } catch (e) {
     fail(`Burn failed (non-critical): ${e.message}`);
@@ -223,7 +225,7 @@ function burnInbox() {
 function refreshCookiesOrExit() {
   step("Running hc_cookie_refresh.js...");
   try {
-    execSync(`node ${REFRESH_SCRIPT}`, { stdio: "inherit" });
+    execFileSync("node", [REFRESH_SCRIPT], { stdio: "inherit" });
     ok("Cookies refreshed. Retrying HF flow...");
   } catch (e) {
     fail("Cookie refresh failed.");
@@ -544,7 +546,7 @@ async function runOnce(attempt = 1, maxAttempts = 2) {
     // friction blocked the signup and forces a cookie refresh retry.
     let confirmLink = null;
     try {
-      confirmLink = execSync(`timeout ${CONFIRM_EMAIL_TIMEOUT} python3 ${BURNER_SCRIPT} check`, { encoding: "utf-8" }).trim();
+      confirmLink = execFileSync("timeout", [String(CONFIRM_EMAIL_TIMEOUT), PYTHON_BIN, BURNER_SCRIPT, "check"], { encoding: "utf-8" }).trim();
       const match = confirmLink.match(/https:\/\/huggingface\.co\/[^\s"'<>]+/);
       confirmLink = match ? match[0] : (confirmLink.startsWith("http") ? confirmLink : null);
     } catch {
@@ -664,7 +666,10 @@ ok("Email confirmed.");
     // flows without visual evidence is just self-harm with extra steps.
     fail(`Error: ${err.message}`);
     if (page) {
-      try { await page.screenshot({ path: "/root/fail_hf_flow.png", fullPage: true }); } catch {}
+      try {
+        fs.mkdirSync(path.dirname(FAILURE_SCREENSHOT), { recursive: true });
+        await page.screenshot({ path: FAILURE_SCREENSHOT, fullPage: true });
+      } catch {}
     }
     burnInbox();
     if (attempt < maxAttempts && isRetryableRunError(err.message)) {

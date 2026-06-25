@@ -17,7 +17,7 @@ from proxy.fallback.nvidia_client import NvidiaResponse
 # This is a small runtime sanity test for the proxy fallback path. It checks
 # that exhausted HF keys get removed and that 402 responses can still fall back
 # to NVIDIA when the provider is available.
-async def test_key_removal() -> None:
+async def check_key_removal() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         keys_file = Path(tmp) / "keys.txt"
         keys_file.write_text("hf_fake_one\nhf_fake_two\n")
@@ -34,7 +34,7 @@ async def test_key_removal() -> None:
     assert store.stats()["exhausted_keys_this_runtime"] == 1
 
 
-async def test_402_uses_nvidia_fallback() -> None:
+async def check_402_uses_nvidia_fallback() -> None:
     # Patch the live proxy module with fake clients so the fallback branch can
     # be exercised without making network calls.
     import proxy.keyhive_proxy as proxy_app
@@ -120,9 +120,17 @@ def test_hysteresis() -> None:
     assert manager.evaluate(10, nvidia_available=True) == "hf"
 
 
+def test_key_removal() -> None:
+    asyncio.run(check_key_removal())
+
+
+def test_402_uses_nvidia_fallback() -> None:
+    asyncio.run(check_402_uses_nvidia_fallback())
+
+
 async def main() -> None:
-    await test_key_removal()
-    await test_402_uses_nvidia_fallback()
+    await check_key_removal()
+    await check_402_uses_nvidia_fallback()
     test_hysteresis()
     print("fallback state test passed")
 

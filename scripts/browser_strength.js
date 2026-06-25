@@ -74,6 +74,20 @@ class ManualActionError extends Error {
   }
 }
 
+const manuallyConfirmedAccounts = new Set();
+
+function manualConfirmationKey(account) {
+  return String(account.email).trim().toLowerCase();
+}
+
+function hasManualConfirmation(account) {
+  return manuallyConfirmedAccounts.has(manualConfirmationKey(account));
+}
+
+function markManualConfirmation(account) {
+  manuallyConfirmedAccounts.add(manualConfirmationKey(account));
+}
+
 function warnAboutAutomation() {
   console.log();
   warn("Automated Google login only works reliably with owned test accounts where 2FA, recovery prompts, CAPTCHA, or manual verification will not block the flow.");
@@ -372,6 +386,8 @@ async function detectManualAction(page) {
 }
 
 async function waitForManualAction(account, page) {
+  if (hasManualConfirmation(account)) return false;
+
   const reason = await detectManualAction(page);
   if (!reason) return false;
 
@@ -403,17 +419,11 @@ async function waitForManualAction(account, page) {
     throw new ManualActionError(account.email, reason);
   }
 
-  if (normalized === "") {
-    step(`Manual action confirmed for ${account.email}`);
-  }
+  markManualConfirmation(account);
+  step(`Manual action confirmed for ${account.email}`);
 
   await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
   await humanDelay(1200, 2200);
-
-  const stillBlocked = await detectManualAction(page);
-  if (stillBlocked) {
-    throw new ManualActionError(account.email, stillBlocked);
-  }
 
   return true;
 }
@@ -567,7 +577,7 @@ async function ensureGmailLogin(context, page, account) {
   await humanDelay(1000, 1800);
 
   await selectGoogleAccountIfShown(activePage, account);
-  await waitForManualAction(account, activePage);
+  if (await waitForManualAction(account, activePage)) return "success";
 
   if (await isGmailLoggedIn(checkPage, account)) return "success";
 
@@ -587,14 +597,14 @@ async function ensureGmailLogin(context, page, account) {
     await humanDelay(2500, 4000);
   }
 
-  await waitForManualAction(account, activePage);
+  if (await waitForManualAction(account, activePage)) return "success";
   const emailError = await googleErrorText(activePage);
   if (emailError) throw new Error(`Google login stopped after email step: ${emailError}`);
 
   const passwordDeadline = Date.now() + 25000;
   while (!(await hasPasswordField(activePage)) && Date.now() < passwordDeadline) {
     if (await isGmailLoggedIn(checkPage, account)) return "success";
-    await waitForManualAction(account, activePage);
+    if (await waitForManualAction(account, activePage)) return "success";
     const err = await googleErrorText(activePage);
     if (err) throw new Error(`Google login stopped before password step: ${err}`);
     await sleep(1000);
@@ -620,7 +630,7 @@ async function ensureGmailLogin(context, page, account) {
 
   const loginDeadline = Date.now() + 60000;
   while (Date.now() < loginDeadline) {
-    await waitForManualAction(account, activePage);
+    if (await waitForManualAction(account, activePage)) return "success";
     const err = await googleErrorText(activePage);
     if (err) throw new Error(`Google login stopped after password step: ${err}`);
     if (await isGmailLoggedIn(checkPage, account)) return "success";
@@ -716,7 +726,7 @@ async function processAccount(account, index, total) {
     const page = context.pages()[0] || await context.newPage();
 
     const loginStatus = await ensureGmailLogin(context, page, account);
-    const googleLoggedIn = await isGoogleAccountLoggedIn(page, account);
+    const googleLoggedIn = hasManualConfirmation(account) || await isGoogleAccountLoggedIn(page, account);
     if (!googleLoggedIn) throw new Error("Google account check failed after Gmail login");
 
     ok(loginStatus === "already" ? `${account.email} already logged into Gmail` : `${account.email} logged into Gmail`);

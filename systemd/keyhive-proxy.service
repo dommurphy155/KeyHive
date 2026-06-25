@@ -10,12 +10,12 @@ Wants=network-online.target
 # fallback provider configuration injected through environment variables.
 Type=simple
 User=root
-WorkingDirectory=/root/api_maker
+WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=/root
-Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=@VENV_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=KEYHIVE_PROXY_HOST=127.0.0.1
 Environment=KEYHIVE_PROXY_PORT=8787
-Environment=KEYHIVE_KEYS_FILE=/root/api_maker/data/keys.txt
+Environment=KEYHIVE_KEYS_FILE=@PROJECT_DIR@/data/keys.txt
 Environment=KEYHIVE_PROXY_DEFAULT_PROVIDER=hf
 Environment=KEYHIVE_PROXY_FALLBACK_PROVIDER=nvidia
 Environment=KEYHIVE_FALLBACK_ENABLED=1
@@ -31,7 +31,7 @@ Environment=KEYHIVE_PROXY_MAX_KEY_FAILOVERS=3
 Environment=KEYHIVE_PROXY_REQUEST_TIMEOUT=300
 Environment=KEYHIVE_PROXY_MAX_RETRIES=2
 Environment=KEYHIVE_PROXY_DEBUG=0
-ExecStart=/root/api_maker/.venv/bin/python -m proxy.keyhive_proxy
+ExecStart=@PYTHON_BIN@ -m proxy.keyhive_proxy
 Restart=always
 RestartSec=5
 StandardOutput=journal

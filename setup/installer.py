@@ -24,8 +24,11 @@ from rich.table import Table
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SETUP_DIR = PROJECT_DIR / "setup"
 DATA_DIR = PROJECT_DIR / "data"
+LOG_DIR = PROJECT_DIR / "logs"
+PROFILES_DIR = PROJECT_DIR / "profiles"
 ENV_FILE = PROJECT_DIR / ".env"
 VENV_DIR = PROJECT_DIR / ".venv"
+PYTHON_BIN = VENV_DIR / "bin" / "python"
 SYSTEMD_DIR = PROJECT_DIR / "systemd"
 WEB_UI_DIR = PROJECT_DIR / "web_ui"
 WEB_FRONTEND_DIR = WEB_UI_DIR / "front_end"
@@ -146,7 +149,9 @@ def ensure_runtime_files() -> None:
     # and web UI expect to exist at runtime.
     console.print("[bold cyan]Runtime files[/bold cyan]")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (PROJECT_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    (PROFILES_DIR / "google").mkdir(parents=True, exist_ok=True)
+    (PROFILES_DIR / "microsoft").mkdir(parents=True, exist_ok=True)
     WEB_FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
     WEB_BACKEND_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "keys.txt").touch(exist_ok=True)
@@ -211,6 +216,20 @@ def install_web_ui_runtime() -> None:
     console.print("[green]Web backend uses existing Python requirements.[/green]")
 
 
+def render_systemd_unit(src: Path) -> str:
+    # Repo service files are templates so the checkout can live anywhere while
+    # systemd still receives absolute paths, which it requires for ExecStart.
+    text = src.read_text(encoding="utf-8")
+    replacements = {
+        "@PROJECT_DIR@": str(PROJECT_DIR),
+        "@VENV_BIN@": str(VENV_DIR / "bin"),
+        "@PYTHON_BIN@": str(PYTHON_BIN if PYTHON_BIN.exists() else Path("/usr/bin/python3")),
+    }
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    return text
+
+
 def install_systemd_units() -> None:
     # Copy the project-local unit files into /etc/systemd/system when the host
     # permits it, then reload systemd so the units are visible immediately.
@@ -222,12 +241,17 @@ def install_systemd_units() -> None:
         console.print("[yellow]Need root/sudo to install systemd units; skipping.[/yellow]")
         return
 
-    prefix = [] if os.geteuid() == 0 else ["sudo"]
     for unit in ("api-maker-scheduler.service", "keyhive-proxy.service", "keyhive-web.service"):
         src = SYSTEMD_DIR / unit
         if src.exists():
-            run(prefix + ["cp", str(src), f"/etc/systemd/system/{unit}"])
+            rendered = render_systemd_unit(src)
+            target = Path("/etc/systemd/system") / unit
+            if os.geteuid() == 0:
+                target.write_text(rendered, encoding="utf-8")
+            else:
+                subprocess.run(["sudo", "tee", str(target)], input=rendered, text=True, stdout=subprocess.DEVNULL, check=True)
             console.print(f"[green]Installed {unit}[/green]")
+    prefix = [] if os.geteuid() == 0 else ["sudo"]
     run(prefix + ["systemctl", "daemon-reload"], check=False)
 
 

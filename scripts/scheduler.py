@@ -13,8 +13,8 @@ from run_stats import ensure_stats_file, record_run
 
 # The scheduler is intentionally boring: it repeatedly executes the scanner,
 # records outcomes, and sleeps the remainder of the fixed cycle.
-ROOT_DIR = Path("/root/api_maker")
-SCRIPT_DIR = Path("/root/api_maker/scripts")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = ROOT_DIR / "scripts"
 HF_KEYS_JS = SCRIPT_DIR / "hf_keys.js"
 LOG_DIR = ROOT_DIR / "logs"
 RUNS_PER_CYCLE = 10

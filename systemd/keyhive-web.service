@@ -6,16 +6,16 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# The UI stays on localhost by default; the host/port values are still exposed
-# so the installer and dashboard can report them consistently.
+# The UI binds publicly by default for operator access; firewall it or change
+# the host before treating this as anything beyond a private control surface.
 Type=simple
 User=root
-WorkingDirectory=/root/api_maker
+WorkingDirectory=@PROJECT_DIR@
 Environment=HOME=/root
-Environment=PATH=/root/api_maker/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=@VENV_BIN@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=KEYHIVE_WEB_HOST=0.0.0.0
 Environment=KEYHIVE_WEB_PORT=8080
-ExecStart=/root/api_maker/.venv/bin/python -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
+ExecStart=@PYTHON_BIN@ -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=5
 StandardOutput=journal

@@ -7,7 +7,7 @@ Implemented Web UI helpers include SSE log streams, recent failure log-context l
 Run locally:
 
 ```bash
-cd /root/api_maker
+cd /path/to/api_maker
 python3 -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
 ```
 

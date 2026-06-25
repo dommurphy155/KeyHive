@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import asyncio
 from pathlib import Path
@@ -15,7 +16,7 @@ import httpx
 # This module is the backend read/write facade for the Web UI. It wraps the
 # scanner, proxy, logs, runtime files, and editable proxy settings into a single
 # API-friendly surface.
-ROOT_DIR = Path("/root/api_maker")
+ROOT_DIR = Path(__file__).resolve().parents[3]
 DATA_DIR = ROOT_DIR / "data"
 LOG_DIR = ROOT_DIR / "logs"
 KEYS_FILE = DATA_DIR / "keys.txt"
@@ -127,9 +128,9 @@ def control_service(service: str, action: str) -> dict[str, Any]:
     if action not in SERVICE_ACTIONS:
         return {"ok": False, "error": f"unsupported action: {action}"}
     if service == SCANNER_SERVICE and action == "start":
-        run_command(["python3", str(RUN_STATS_SCRIPT), "ensure"])
+        run_command([sys.executable, str(RUN_STATS_SCRIPT), "ensure"])
     if service == SCANNER_SERVICE and action == "restart":
-        run_command(["python3", str(RUN_STATS_SCRIPT), "reset-since-restart"])
+        run_command([sys.executable, str(RUN_STATS_SCRIPT), "reset-since-restart"])
     result = run_command(["systemctl", action, service], timeout=20.0)
     return {"action": action, "service": service, **result}
 

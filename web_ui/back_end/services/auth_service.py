@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hmac
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv("/root/api_maker/.env")
+# Resolve the project root from this module so the Web UI does not depend on a
+# fixed checkout path.
+ROOT_DIR = Path(__file__).resolve().parents[3]
+load_dotenv(ROOT_DIR / ".env")
 
 # The login page can validate either a password-style secret or a token-style
 # secret. Route protection is not wired up yet, but the secret check is here.

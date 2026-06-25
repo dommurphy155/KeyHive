@@ -12,8 +12,9 @@ from web_ui.back_end.services import auth_service
 
 # This FastAPI app is the Web UI surface. It serves static files and forwards
 # status/control calls to the existing scanner and proxy services.
-FRONT_END_DIR = Path("/root/api_maker/web_ui/front_end")
-ASSETS_DIR = Path("/root/api_maker/assets")
+ROOT_DIR = Path(__file__).resolve().parents[2]
+FRONT_END_DIR = ROOT_DIR / "web_ui" / "front_end"
+ASSETS_DIR = ROOT_DIR / "assets"
 
 app = FastAPI(
     title="KeyHive Web UI",

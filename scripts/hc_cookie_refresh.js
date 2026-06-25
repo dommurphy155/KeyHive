@@ -20,6 +20,8 @@ const X_DISPLAY    = ":1";
 const CHROME_LOG   = path.join(ROOT_DIR, "logs", "chrome-9333.log");
 const COOKIE_OUT   = path.join(ROOT_DIR, "data", "hc_cookie.json");
 const PROFILE_ROOT = path.join(ROOT_DIR, "profiles", "google");
+const GOOGLE_PROFILE_ROOT = PROFILE_ROOT;
+const MICROSOFT_PROFILE_ROOT = path.join(ROOT_DIR, "profiles", "microsoft");
 const STRENGTH_DIR = path.join(ROOT_DIR, "data", "browser_strength");
 const ACCOUNT_STATUS_PATH = path.join(STRENGTH_DIR, "accounts.json");
 const BROWSER_STRENGTH_SCRIPT = path.join(ROOT_DIR, "scripts", "browser_strength.js");
@@ -46,26 +48,95 @@ const dbg  = (msg) => { if (process.env.DEBUG) console.log(`[${ts()}]   ${msg}`)
 const sleep      = (ms)  => new Promise((r) => setTimeout(r, ms));
 const humanDelay = (min = 500, max = 1200) => sleep(min + Math.random() * (max - min));
 
-// Load Gmail credentials from the shared .env file. The refresh script uses the
-// same account list that browser_strength.js validates and checkpoints.
+// Load Gmail credentials from the shared .env file, then merge in every Chrome
+// profile folder on disk. Profile discovery is deliberately authoritative:
+// metadata gets stale, folders do not lie.
 function loadAccounts() {
   const raw = process.env.GMAIL_ACCOUNTS;
-  if (!raw) {
-    console.error("✗ Missing GMAIL_ACCOUNTS in .env");
-    console.error('  Expected: GMAIL_ACCOUNTS=[{"email":"x@gmail.com","password":"y"}]');
-    process.exit(1);
-  }
+  let accounts = [];
+
   try {
-    const accounts = JSON.parse(raw);
-    if (!Array.isArray(accounts) || accounts.length === 0) throw new Error("empty array");
-    for (const a of accounts) {
-      if (!a.email || !a.password) throw new Error(`account missing email/password: ${JSON.stringify(a)}`);
+    if (raw) {
+      accounts = JSON.parse(raw);
+      if (!Array.isArray(accounts)) throw new Error("must be an array");
+      for (const a of accounts) {
+        if (!a.email || !a.password) throw new Error(`account missing email/password: ${JSON.stringify(a)}`);
+      }
+    } else {
+      warn("GMAIL_ACCOUNTS missing; using discovered Chrome profiles only");
     }
-    return accounts;
+
+    const loaded = includeProfileDirectories(includeReadyManualProfiles(accounts));
+    if (loaded.length === 0) throw new Error("no .env accounts or Chrome profile directories found");
+    return loaded;
   } catch (e) {
-    console.error(`✗ GMAIL_ACCOUNTS parse error: ${e.message}`);
+    console.error(`✗ Account load error: ${e.message}`);
     process.exit(1);
   }
+}
+
+function inferEmailFromProfileName(name) {
+  const clean = String(name || "").trim().toLowerCase();
+  return clean.replace(/_([a-z0-9.-]+\.[a-z]{2,})$/i, "@$1");
+}
+
+function providerRoot(provider) {
+  return provider === "microsoft" ? MICROSOFT_PROFILE_ROOT : GOOGLE_PROFILE_ROOT;
+}
+
+function providerForEmail(email) {
+  const domain = String(email || "").split("@").pop()?.toLowerCase() || "";
+  if (["hotmail.com", "outlook.com", "live.com", "msn.com"].includes(domain)) return "microsoft";
+  return "google";
+}
+
+function accountKey(account) {
+  return `${account.provider || providerForEmail(account.email)}:${String(account.email).toLowerCase()}`;
+}
+
+function profileAccountFromDir(provider, dir) {
+  const email = inferEmailFromProfileName(path.basename(dir));
+  return {
+    email,
+    provider,
+    profileDir: dir,
+    manualProfile: true,
+  };
+}
+
+function listProfileDirs(root) {
+  try {
+    return fs.readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => path.join(root, entry.name))
+      .filter((dir) => fs.existsSync(path.join(dir, "Default")) && fs.statSync(path.join(dir, "Default")).isDirectory());
+  } catch {
+    return [];
+  }
+}
+
+function includeProfileDirectories(accounts) {
+  const out = accounts.map((account) => ({
+    ...account,
+    provider: account.provider || providerForEmail(account.email),
+  }));
+  const seen = new Map(out.map((account, index) => [accountKey(account), index]));
+
+  for (const [provider, root] of [["google", GOOGLE_PROFILE_ROOT], ["microsoft", MICROSOFT_PROFILE_ROOT]]) {
+    for (const dir of listProfileDirs(root)) {
+      const account = profileAccountFromDir(provider, dir);
+      const key = accountKey(account);
+      if (seen.has(key)) {
+        const index = seen.get(key);
+        out[index] = { ...out[index], profileDir: dir, provider };
+        continue;
+      }
+      out.push(account);
+      seen.set(key, out.length - 1);
+    }
+  }
+
+  return out;
 }
 
 // Save the cookie jar atomically so hf_keys.js never reads a half-written file.
@@ -91,30 +162,167 @@ function readAccountStatus() {
   }
 }
 
+function accountStatus(account) {
+  return readAccountStatus()[account.email] || null;
+}
+
+function safeEmail(email) {
+  return String(email).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_");
+}
+
+function profileDirFor(account) {
+  if (account.profileDir && fs.existsSync(account.profileDir)) return account.profileDir;
+
+  const statusProfileDir = statusPath(accountStatus(account)?.profileDir);
+  if (statusProfileDir && fs.existsSync(statusProfileDir)) {
+    const relative = path.relative(providerRoot(account.provider || providerForEmail(account.email)), statusProfileDir);
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      return statusProfileDir;
+    }
+  }
+
+  return path.join(providerRoot(account.provider || providerForEmail(account.email)), safeEmail(account.email));
+}
+
 function statusPath(value) {
   if (!value || typeof value !== "string") return null;
   return path.isAbsolute(value) ? value : path.resolve(ROOT_DIR, value);
 }
 
-function readyProfileDir(account) {
-  // Only profiles that browser_strength.js marked as fully ready are eligible.
-  const status = readAccountStatus()[account.email];
-  if (!status || typeof status.profileDir !== "string") return null;
+function includeReadyManualProfiles(accounts) {
+  // Manual profiles created by add_captcha_account.js do not need Gmail
+  // passwords, but they do need the same ready status contract as
+  // browser_strength.js profiles.
+  const out = [...accounts];
+  const seen = new Set(out.map((account) => String(account.email).toLowerCase()));
+  const status = readAccountStatus();
 
-  const profileDir = statusPath(status.profileDir);
+  for (const email of Object.keys(status)) {
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    const account = { email, manualProfile: status[email]?.addedManually === true };
+    if (!readyProfileDir(account)) continue;
+    out.push(account);
+    seen.add(key);
+  }
+
+  return out;
+}
+
+function readyProfileDir(account) {
+  // Prefer browser_strength.js readiness metadata, but do not ignore a real
+  // Chrome profile just because the checkpoint went stale. Manual/imported
+  // profiles are common here and the browser itself is the source of truth.
+  const status = readAccountStatus()[account.email];
+  const profileDir = profileDirFor(account);
+  const hasChromeProfile = Boolean(profileDir) &&
+    fs.existsSync(profileDir) &&
+    fs.statSync(profileDir).isDirectory() &&
+    fs.existsSync(path.join(profileDir, "Default")) &&
+    fs.statSync(path.join(profileDir, "Default")).isDirectory();
+
+  if (!status) return hasChromeProfile ? profileDir : null;
+
   const storageStatePath = statusPath(status.storageStatePath);
   const ready = status.googleLoggedIn === true &&
     status.gmailChecked === true &&
     status.hcaptchaReachable === true &&
     status.setCookieVisible === true &&
-    Boolean(profileDir) &&
     Boolean(storageStatePath) &&
-    fs.existsSync(profileDir) &&
-    fs.statSync(profileDir).isDirectory() &&
+    hasChromeProfile &&
     fs.existsSync(storageStatePath) &&
     fs.statSync(storageStatePath).isFile();
 
-  return ready ? profileDir : null;
+  return ready || account.manualProfile || Boolean(account.profileDir) ? profileDir : null;
+}
+
+function normalizeSameSite(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "strict") return "Strict";
+  if (normalized === "none" || normalized === "no_restriction") return "None";
+  return "Lax";
+}
+
+function toPlaywrightCookie(cookie) {
+  if (!cookie || !cookie.name || typeof cookie.value !== "string") return null;
+  if (cookie.expires && cookie.expires > 0 && cookie.expires <= Date.now() / 1000) return null;
+
+  const out = {
+    name: cookie.name,
+    value: cookie.value,
+    path: cookie.path || "/",
+    httpOnly: Boolean(cookie.httpOnly),
+    secure: Boolean(cookie.secure),
+    sameSite: normalizeSameSite(cookie.sameSite),
+  };
+
+  if (cookie.domain) {
+    out.domain = cookie.domain;
+  } else if (cookie.url) {
+    out.url = cookie.url;
+  } else {
+    return null;
+  }
+
+  if (cookie.expires && cookie.expires > 0) out.expires = cookie.expires;
+  return out;
+}
+
+async function addCookiesBestEffort(context, cookies) {
+  try {
+    await context.addCookies(cookies);
+    return cookies.length;
+  } catch (err) {
+    dbg(`Bulk cookie restore failed: ${err.message}`);
+  }
+
+  let added = 0;
+  for (const cookie of cookies) {
+    try {
+      await context.addCookies([cookie]);
+      added++;
+    } catch (err) {
+      dbg(`Skipped saved cookie ${cookie.name}: ${err.message}`);
+    }
+  }
+  return added;
+}
+
+function loadSavedProfileCookies(account) {
+  const status = accountStatus(account);
+  if (!status) return [];
+
+  const candidates = [status.cookiesPath, status.storageStatePath]
+    .map(statusPath)
+    .filter(Boolean)
+    .filter((file) => fs.existsSync(file) && fs.statSync(file).isFile());
+
+  for (const file of candidates) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      const cookies = Array.isArray(parsed) ? parsed : parsed.cookies;
+      if (Array.isArray(cookies) && cookies.length > 0) return cookies;
+    } catch (err) {
+      dbg(`Could not load saved cookies from ${file}: ${err.message}`);
+    }
+  }
+
+  return [];
+}
+
+async function primeContextFromSavedProfile(context, account) {
+  const cookies = loadSavedProfileCookies(account)
+    .map(toPlaywrightCookie)
+    .filter(Boolean);
+
+  if (cookies.length === 0) return;
+
+  try {
+    const added = await addCookiesBestEffort(context, cookies);
+    dbg(`Primed profile with ${added}/${cookies.length} saved cookie(s)`);
+  } catch (err) {
+    warn(`Saved profile cookie restore failed: ${err.message}`);
+  }
 }
 
 function isProfileReady(account) {
@@ -124,11 +332,16 @@ function isProfileReady(account) {
 function ensureReadyProfiles(accounts) {
   // If the profile state file says an account is stale or incomplete, rerun the
   // browser-strength prep step before trying to refresh cookies.
-  fs.mkdirSync(PROFILE_ROOT, { recursive: true });
+  fs.mkdirSync(GOOGLE_PROFILE_ROOT, { recursive: true });
+  fs.mkdirSync(MICROSOFT_PROFILE_ROOT, { recursive: true });
   fs.mkdirSync(STRENGTH_DIR, { recursive: true });
   fs.mkdirSync(path.dirname(CHROME_LOG), { recursive: true });
 
-  const missing = accounts.filter((account) => !isProfileReady(account));
+  const missing = accounts.filter((account) =>
+    (account.provider || providerForEmail(account.email)) === "google" &&
+    account.password &&
+    !isProfileReady(account)
+  );
   if (missing.length === 0) {
     ok("All browser profiles are ready");
     return;
@@ -350,6 +563,46 @@ async function findSetCookieButton(context, timeout = POLL_TIMEOUT) {
   return { dashPage: null, setCookieEl: null };
 }
 
+async function hcaptchaNeedsProviderSignIn(context, provider) {
+  const pattern = provider === "microsoft" ? /sign in with microsoft/i : /sign in with google/i;
+  for (const pg of context.pages()) {
+    try {
+      const url = pg.url();
+      if (!url.includes("hcaptcha.com") && url !== "about:blank") continue;
+      if (await visible(pg.getByRole("button", { name: pattern }))) return true;
+      if (await visible(pg.getByRole("link", { name: pattern }))) return true;
+      if (await visible(pg.getByText(pattern))) return true;
+    } catch {}
+  }
+  return false;
+}
+
+async function clickProviderSignIn(page, provider) {
+  if (provider === "microsoft") {
+    step("Clicking Sign in with Microsoft instead...");
+    await pollAndClick(page, "SignInWithMicrosoft", [
+      { description: 'getByRole button "sign in with microsoft"', locatorFn: (p) => p.getByRole("button", { name: /sign in with microsoft/i }) },
+      { description: 'getByRole link "sign in with microsoft"',   locatorFn: (p) => p.getByRole("link",   { name: /sign in with microsoft/i }) },
+      { description: 'getByText "sign in with microsoft"',        locatorFn: (p) => p.getByText(/sign in with microsoft/i) },
+      { description: '[aria-label*="microsoft" i]',              locatorFn: (p) => p.locator('[aria-label*="microsoft" i]') },
+      { description: '[data-provider="microsoft"]',              locatorFn: (p) => p.locator('[data-provider="microsoft"]') },
+      { description: 'a[href*="login.microsoftonline.com"]',      locatorFn: (p) => p.locator('a[href*="login.microsoftonline.com"]') },
+      { description: 'a[href*="live.com"]',                      locatorFn: (p) => p.locator('a[href*="live.com"]') },
+    ]);
+    return;
+  }
+
+  step("Clicking Sign in with Google...");
+  await pollAndClick(page, "SignInWithGoogle", [
+    { description: 'getByRole button "sign in with google"', locatorFn: (p) => p.getByRole("button", { name: /sign in with google/i }) },
+    { description: 'getByRole link "sign in with google"',   locatorFn: (p) => p.getByRole("link",   { name: /sign in with google/i }) },
+    { description: 'getByText "sign in with google"',        locatorFn: (p) => p.getByText(/sign in with google/i) },
+    { description: '[aria-label*="google" i]',               locatorFn: (p) => p.locator('[aria-label*="google" i]') },
+    { description: '[data-provider="google"]',               locatorFn: (p) => p.locator('[data-provider="google"]') },
+    { description: 'a[href*="accounts.google.com"]',         locatorFn: (p) => p.locator('a[href*="accounts.google.com"]') },
+  ]);
+}
+
 async function trySetCookieAndExtract(context, label, timeout = 500) {
   // Single attempt: find the Set Cookie control, click it, check the page for
   // a quota message, then verify the cookie jar actually gained the hCaptcha
@@ -412,7 +665,7 @@ async function reloadHcaptchaAccessibility(page) {
 // → if no cookie appeared, reload the accessibility page and try again. A
 // single Set Cookie click can silently no-op (hCaptcha returns nothing), so a
 // real retry requires a fresh page load, not a repeated click on a spent button.
-async function runSetCookieLoop(context, page, label, totalTimeout = 30000, findTimeout = 1500) {
+async function runSetCookieLoop(context, page, label, totalTimeout = 30000, findTimeout = 1500, provider = "google") {
   const deadline = Date.now() + totalTimeout;
   let attempt = 0;
 
@@ -420,6 +673,11 @@ async function runSetCookieLoop(context, page, label, totalTimeout = 30000, find
     attempt++;
     const cookies = await trySetCookieAndExtract(context, `${label} #${attempt}`, findTimeout);
     if (cookies) return cookies;
+
+    if (await hcaptchaNeedsProviderSignIn(context, provider)) {
+      step(`hCaptcha still wants ${provider} sign-in (${label}); moving to provider session reuse`);
+      return null;
+    }
 
     // No cookie this round — reload so the next attempt starts from a clean
     // dashboard instead of re-clicking a control that already fired.
@@ -523,23 +781,29 @@ async function attemptAccount(account) {
   // One account attempt is one browser session: open the ready profile, reach
   // hCaptcha, click Set Cookie, and export the resulting cookies.
   const profileDir  = readyProfileDir(account);
+  const provider = account.provider || providerForEmail(account.email);
   let chromeProcess = null;
   let browser       = null;
 
   try {
     if (!profileDir) {
-      throw new Error(`Persistent Google profile is not ready for ${account.email}; run node ${BROWSER_STRENGTH_SCRIPT}`);
+      throw new Error(`Persistent ${provider} profile is not ready for ${account.email}`);
     }
 
     step("Starting Chrome...");
+    step(`Chrome profile: ${profileDir}`);
     killPort(CDP_PORT);
     await killProfileChrome(profileDir);
     chromeProcess = await launchChrome(profileDir);
     ok("Chrome ready");
 
     browser = await chromium.connectOverCDP(`http://${CDP_HOST}:${CDP_PORT}`);
-    const context = browser.contexts()[0] ?? (await browser.newContext());
-    const page    = context.pages()[0]    ?? (await context.newPage());
+    const context = browser.contexts()[0];
+    if (!context) {
+      throw new Error(`Chrome did not expose the persistent profile context for ${profileDir}`);
+    }
+    const page = context.pages()[0] ?? (await context.newPage());
+    await primeContextFromSavedProfile(context, account);
 
     // ── 1. Navigate ─────────────────────────────────────────────────────────
     step("Loading hcaptcha login...");
@@ -552,26 +816,90 @@ async function attemptAccount(account) {
     // check for a quota message, check the cookie jar, and reload-and-retry if no
     // cookie appeared. This is the path that works for an already-authenticated
     // profile (account 1's happy path), so we try it first and hardest.
-    let cookies = await runSetCookieLoop(context, page, "after hcaptcha load", 20000, 1500);
+    let cookies = await runSetCookieLoop(context, page, "after hcaptcha load", 20000, 1500, provider);
     if (cookies) return cookies;
 
-    // ── 2. Sign in with Google ───────────────────────────────────────────────
-    // Only reach for the Google sign-in path if the dashboard still requires it
-    // (i.e. Set Cookie never appeared). Re-running the loop after each Google
+    // ── 2. Sign in with provider ─────────────────────────────────────────────
+    // Only reach for the provider sign-in path if the dashboard still requires it
+    // (i.e. Set Cookie never appeared). Re-running the loop after each provider
     // step means a profile that becomes authenticated mid-flow is caught here
     // instead of being driven blindly through the full login form.
-    step("Clicking Sign in with Google...");
-    await pollAndClick(page, "SignInWithGoogle", [
-      { description: 'getByRole button "sign in with google"', locatorFn: (p) => p.getByRole("button", { name: /sign in with google/i }) },
-      { description: 'getByRole link "sign in with google"',   locatorFn: (p) => p.getByRole("link",   { name: /sign in with google/i }) },
-      { description: 'getByText "sign in with google"',        locatorFn: (p) => p.getByText(/sign in with google/i) },
-      { description: '[aria-label*="google" i]',               locatorFn: (p) => p.locator('[aria-label*="google" i]') },
-      { description: '[data-provider="google"]',               locatorFn: (p) => p.locator('[data-provider="google"]') },
-      { description: 'a[href*="accounts.google.com"]',         locatorFn: (p) => p.locator('a[href*="accounts.google.com"]') },
-    ]);
+    await clickProviderSignIn(page, provider);
     await humanDelay(1000, 1500);
-    cookies = await runSetCookieLoop(context, page, "after Google sign-in click", 8000, 1000);
+    cookies = await runSetCookieLoop(context, page, `after ${provider} sign-in click`, 10000, 1000, provider);
     if (cookies) return cookies;
+
+    if (provider === "microsoft") {
+      step("Waiting for Microsoft auth...");
+      let microsoftPage = null;
+      const mDeadline = Date.now() + 20000;
+
+      while (Date.now() < mDeadline) {
+        for (const pg of context.pages()) {
+          try {
+            const url = pg.url();
+            if (/login\.live\.com|login\.microsoftonline\.com|account\.live\.com/i.test(url)) {
+              microsoftPage = pg;
+              break;
+            }
+          } catch {}
+        }
+        if (microsoftPage) break;
+        await sleep(POLL_INTERVAL);
+      }
+
+      if (!microsoftPage) {
+        cookies = await runSetCookieLoop(context, page, "after Microsoft redirect", 20000, 1500, provider);
+        if (cookies) return cookies;
+        throw new Error("Microsoft auth page never appeared and Set Cookie was not available");
+      }
+
+      ok("Microsoft auth opened");
+      try { await microsoftPage.waitForLoadState("domcontentloaded", { timeout: 10000 }); } catch {}
+      await humanDelay(1000, 2000);
+
+      if (await visible(microsoftPage.locator('input[type="email"], input[name="loginfmt"]'))) {
+        step(`Entering Microsoft email (${account.email})...`);
+        await pollAndFill(microsoftPage, "MicrosoftEmail", [
+          { description: 'input[name="loginfmt"]', locatorFn: (p) => p.locator('input[name="loginfmt"]') },
+          { description: 'input[type="email"]',   locatorFn: (p) => p.locator('input[type="email"]') },
+        ], account.email);
+        await humanDelay(700, 1200);
+        await pollAndClick(microsoftPage, "MicrosoftEmailNext", [
+          { description: '#idSIButton9',             locatorFn: (p) => p.locator('#idSIButton9') },
+          { description: 'input[type="submit"]',    locatorFn: (p) => p.locator('input[type="submit"]') },
+          { description: 'getByRole button "Next"', locatorFn: (p) => p.getByRole("button", { name: /^next$/i }) },
+        ]);
+        await humanDelay(2500, 3500);
+      }
+
+      cookies = await runSetCookieLoop(context, page, "after Microsoft email step", 12000, 1000, provider);
+      if (cookies) return cookies;
+
+      if (await visible(microsoftPage.locator('input[type="password"], input[name="passwd"]'))) {
+        if (!account.password) {
+          throw new Error("Microsoft profile reached a password prompt; sign in manually once, then rerun hc_cookie_refresh.js");
+        }
+
+        step("Entering Microsoft password...");
+        await pollAndFill(microsoftPage, "MicrosoftPassword", [
+          { description: 'input[name="passwd"]',   locatorFn: (p) => p.locator('input[name="passwd"]') },
+          { description: 'input[type="password"]', locatorFn: (p) => p.locator('input[type="password"]') },
+        ], account.password);
+        await humanDelay(700, 1200);
+        await pollAndClick(microsoftPage, "MicrosoftPasswordNext", [
+          { description: '#idSIButton9',             locatorFn: (p) => p.locator('#idSIButton9') },
+          { description: 'input[type="submit"]',    locatorFn: (p) => p.locator('input[type="submit"]') },
+          { description: 'getByRole button "Sign in"', locatorFn: (p) => p.getByRole("button", { name: /sign in/i }) },
+        ]);
+        await humanDelay(2500, 3500);
+      }
+
+      cookies = await runSetCookieLoop(context, page, "after Microsoft auth", 35000, 1500, provider);
+      if (cookies) return cookies;
+
+      throw new Error("Set Cookie never produced an accessibility cookie");
+    }
 
     // ── 3. Find Google auth page ─────────────────────────────────────────────
     step("Waiting for Google auth...");
@@ -596,7 +924,7 @@ async function attemptAccount(account) {
     try { await googlePage.waitForLoadState("domcontentloaded", { timeout: 10000 }); } catch {}
     await humanDelay(1000, 2000);
     await selectGoogleAccountIfShown(googlePage, account);
-    cookies = await runSetCookieLoop(context, page, "after account selection", 8000, 1000);
+    cookies = await runSetCookieLoop(context, page, "after account selection", 8000, 1000, provider);
     if (cookies) return cookies;
 
     // ── 4. Email ─────────────────────────────────────────────────────────────
@@ -621,11 +949,15 @@ async function attemptAccount(account) {
       await humanDelay(2500, 3500);
     }
 
-    cookies = await runSetCookieLoop(context, page, "after email step", 8000, 1000);
+    cookies = await runSetCookieLoop(context, page, "after email step", 8000, 1000, provider);
     if (cookies) return cookies;
 
     // ── 6. Password ──────────────────────────────────────────────────────────
     if (await visible(googlePage.locator('input[name="Passwd"], input[type="password"], #password input'))) {
+      if (accountStatus(account)?.addedManually && !account.password) {
+        throw new Error("Manual profile reached a password prompt; rerun add_captcha_account.js for this account");
+      }
+
       step("Entering password...");
       await pollAndFill(googlePage, "GooglePassword", [
         { description: 'input[name="Passwd"]',   locatorFn: (p) => p.locator('input[name="Passwd"]') },
@@ -648,7 +980,7 @@ async function attemptAccount(account) {
     // After the Google login has settled, give the accessibility dashboard a
     // generous reload-and-retry window. This is the catch-all that mirrors what
     // account 1 does on a fresh authenticated profile.
-    cookies = await runSetCookieLoop(context, page, "after Google auth", 35000, 1500);
+    cookies = await runSetCookieLoop(context, page, "after Google auth", 35000, 1500, provider);
     if (cookies) return cookies;
 
     throw new Error("Set Cookie never produced an accessibility cookie");

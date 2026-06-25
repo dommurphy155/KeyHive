@@ -21,8 +21,9 @@ import sys
 
 # The key counter reads the canonical output file used by hf_keys.js and turns
 # it into a rough value estimate for reporting purposes.
-KEYS_FILE = Path("/root/api_maker/data/keys.txt")
-LAST_COUNT_FILE = Path("/root/api_maker/data/.last_key_count")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+KEYS_FILE = ROOT_DIR / "data" / "keys.txt"
+LAST_COUNT_FILE = ROOT_DIR / "data" / ".last_key_count"
 
 # Assumed dollar value credited to each Hugging Face key. This is a rough
 # stand-in for the monthly inference credits a fresh key unlocks, not a real

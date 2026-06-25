@@ -11,7 +11,7 @@ from pathlib import Path
 # This file is the bookkeeping layer for scanner runs. It keeps both
 # since-restart and all-time counters so the CLI and web UI can report the same
 # numbers without parsing logs repeatedly.
-ROOT_DIR = Path("/root/api_maker")
+ROOT_DIR = Path(__file__).resolve().parents[1]
 STATS_FILE = ROOT_DIR / "data" / "run_stats.json"
 LOCK_FILE = ROOT_DIR / "data" / "run_stats.lock"
 
@@ -176,7 +176,7 @@ def classify_failure(output: str, return_code: int) -> str | None:
     # The caller records broad failure classes instead of trying to preserve
     # every possible error string verbatim.
     lowered = output.lower()
-    if return_code == 0 and "saved to /root/api_maker/data/keys.txt" in lowered:
+    if return_code == 0 and "saved to" in lowered and "data/keys.txt" in lowered:
         return None
 
     for category, patterns in FAILURE_PATTERNS.items():

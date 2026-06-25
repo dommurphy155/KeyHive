@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -30,13 +31,14 @@ from proxy.openai_compat import (
     sse_from_text,
 )
 
-load_dotenv("/root/api_maker/.env")
+ROOT_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT_DIR / ".env")
 
 # The proxy exposes an OpenAI-compatible chat API backed by Hugging Face keys
 # with NVIDIA fallback when the HF key pool gets thin or exhausted.
 HOST = os.getenv("KEYHIVE_PROXY_HOST", "127.0.0.1")
 PORT = int(os.getenv("KEYHIVE_PROXY_PORT", "8787"))
-KEYS_FILE = os.getenv("KEYHIVE_KEYS_FILE", "/root/api_maker/data/keys.txt")
+KEYS_FILE = os.getenv("KEYHIVE_KEYS_FILE", str(ROOT_DIR / "data" / "keys.txt"))
 DEFAULT_PROVIDER = os.getenv("KEYHIVE_PROXY_DEFAULT_PROVIDER", "hf")
 FALLBACK_PROVIDER = os.getenv("KEYHIVE_PROXY_FALLBACK_PROVIDER", "nvidia")
 HF_BASE_URL = os.getenv("KEYHIVE_HF_BASE_URL", "https://router.huggingface.co/v1")

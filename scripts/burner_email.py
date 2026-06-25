@@ -13,6 +13,7 @@ import time
 import os
 import sys
 import json
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -27,8 +28,10 @@ except ImportError:
     print("Error: httpx not installed. Run: pip install httpx", file=sys.stderr)
     sys.exit(1)
 
-STATE_FILE = "/root/api_maker/data/.agentmail_state.json"
-ENV_FILE = "/root/api_maker/.env"
+# Resolve from this file so the helper keeps working after the repo moves.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+STATE_FILE = ROOT_DIR / "data" / ".agentmail_state.json"
+ENV_FILE = ROOT_DIR / ".env"
 
 class AgentMailManager:
     BASE = "https://api.agentmail.to/v0"
@@ -167,8 +170,8 @@ async def cmd_create():
             sys.exit(1)
         address = f"{local}@{domain}"
 
-    with open(STATE_FILE, "w") as f:
-        json.dump({"inbox_id": inbox_id, "address": address}, f)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps({"inbox_id": inbox_id, "address": address}) + "\n", encoding="utf-8")
 
     print(address)
 
@@ -176,12 +179,11 @@ async def cmd_create():
 async def cmd_check():
     # The state file is the only thing that ties this poll back to the inbox
     # created earlier in the run.
-    if not os.path.exists(STATE_FILE):
+    if not STATE_FILE.exists():
         print("Error: No state file. Run 'create' first.", file=sys.stderr)
         sys.exit(1)
 
-    with open(STATE_FILE) as f:
-        state = json.load(f)
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
 
     inbox_id = state["inbox_id"]
     load_dotenv(ENV_FILE)
@@ -201,12 +203,11 @@ async def cmd_burn():
     """Delete the inbox after use and clean up state."""
     # Best-effort cleanup: delete the remote inbox if possible, then remove the
     # local state file so the next run starts clean.
-    if not os.path.exists(STATE_FILE):
+    if not STATE_FILE.exists():
         print("[AgentMail] No state file to burn.", file=sys.stderr)
         return
 
-    with open(STATE_FILE) as f:
-        state = json.load(f)
+    state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
 
     load_dotenv(ENV_FILE)
     api_key = os.getenv("AGENTMAIL_API_KEY")
@@ -220,7 +221,7 @@ async def cmd_burn():
         await mgr.delete_inbox(inbox_id)
 
     try:
-        os.remove(STATE_FILE)
+        STATE_FILE.unlink()
         print("[AgentMail] State file removed.", file=sys.stderr)
     except Exception:
         pass

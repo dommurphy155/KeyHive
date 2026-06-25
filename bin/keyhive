@@ -2,9 +2,16 @@
 set -euo pipefail
 
 # `keyhive` is the operator-facing wrapper around the scanner, proxy, web UI,
-# and diagnostics. It deliberately keeps the real scripts and systemd unit
-# names centralized here so the rest of the repo can stay boring.
-ROOT_DIR="/root/api_maker"
+# and diagnostics. Resolve the real script location so a /usr/local/bin symlink
+# still controls whichever checkout installed it.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+ROOT_DIR="$(cd "$BIN_DIR/.." && pwd)"
 SCRIPTS_DIR="$ROOT_DIR/scripts"
 DATA_DIR="$ROOT_DIR/data"
 SYSTEMD_DIR="$ROOT_DIR/systemd"
@@ -64,6 +71,7 @@ usage() {
   printf "API key automation + local AI proxy control\n"
 
   section "USAGE"
+  row "keyhive" "Open interactive SSH-friendly menu"
   row "keyhive [cmd]" "Run scanner, proxy, and reporting commands"
 
   section "SCANNER"
@@ -107,6 +115,132 @@ usage() {
 
   section "PROJECT"
   printf "  %s\n" "$ROOT_DIR"
+}
+
+prompt_enter() {
+  printf "\nPress Enter to continue..."
+  IFS= read -r _ || true
+}
+
+run_menu_action() {
+  set +e
+  "$@"
+  code="$?"
+  set -e
+  if [ "$code" -ne 0 ]; then
+    printf "\nCommand exited with status %s\n" "$code"
+  fi
+  prompt_enter
+}
+
+scanner_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    printf "%sKEYHIVE / Scanner%s\n" "$BOLD" "$RESET"
+    printf "1) Start\n2) Stop\n3) Restart\n4) Status\n5) Logs\n6) Follow logs\n7) Manual run once\n0) Back\n\n"
+    printf "Choice: "
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1) run_menu_action start_service ;;
+      2) run_menu_action stop_service ;;
+      3) run_menu_action restart_service ;;
+      4) run_menu_action show_status ;;
+      5) run_menu_action show_logs ;;
+      6) show_logs -f ;;
+      7) run_menu_action run_manual 1 ;;
+      0|"") return 0 ;;
+      *) printf "Invalid choice: %s\n" "$choice"; prompt_enter ;;
+    esac
+  done
+}
+
+proxy_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    printf "%sKEYHIVE / Proxy%s\n" "$BOLD" "$RESET"
+    printf "1) Start\n2) Stop\n3) Restart\n4) Status\n5) Logs\n6) Follow logs\n7) Stats\n8) Fallback\n9) Test\n0) Back\n\n"
+    printf "Choice: "
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1) run_menu_action proxy_start ;;
+      2) run_menu_action proxy_stop ;;
+      3) run_menu_action proxy_restart ;;
+      4) run_menu_action proxy_status ;;
+      5) run_menu_action show_proxy_logs ;;
+      6) show_proxy_logs -f ;;
+      7) run_menu_action proxy_stats ;;
+      8) run_menu_action proxy_fallback ;;
+      9) run_menu_action proxy_test ;;
+      0|"") return 0 ;;
+      *) printf "Invalid choice: %s\n" "$choice"; prompt_enter ;;
+    esac
+  done
+}
+
+web_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    printf "%sKEYHIVE / Web UI%s\n" "$BOLD" "$RESET"
+    printf "1) Start\n2) Stop\n3) Restart\n4) Status\n5) Logs\n6) Follow logs\n0) Back\n\n"
+    printf "Choice: "
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1) run_menu_action web_start ;;
+      2) run_menu_action web_stop ;;
+      3) run_menu_action web_restart ;;
+      4) run_menu_action web_status ;;
+      5) run_menu_action show_web_logs ;;
+      6) show_web_logs -f ;;
+      0|"") return 0 ;;
+      *) printf "Invalid choice: %s\n" "$choice"; prompt_enter ;;
+    esac
+  done
+}
+
+logs_menu() {
+  while true; do
+    clear 2>/dev/null || true
+    printf "%sKEYHIVE / Logs%s\n" "$BOLD" "$RESET"
+    printf "1) Scanner logs\n2) Follow scanner logs\n3) Proxy logs\n4) Follow proxy logs\n5) Web logs\n6) Follow web logs\n0) Back\n\n"
+    printf "Choice: "
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1) run_menu_action show_logs ;;
+      2) show_logs -f ;;
+      3) run_menu_action show_proxy_logs ;;
+      4) show_proxy_logs -f ;;
+      5) run_menu_action show_web_logs ;;
+      6) show_web_logs -f ;;
+      0|"") return 0 ;;
+      *) printf "Invalid choice: %s\n" "$choice"; prompt_enter ;;
+    esac
+  done
+}
+
+interactive_menu() {
+  if [ ! -t 0 ]; then
+    usage
+    return 0
+  fi
+
+  while true; do
+    clear 2>/dev/null || true
+    printf "%sKEYHIVE%s\n" "$BOLD" "$RESET"
+    printf "1) Scanner\n2) Proxy\n3) Web UI\n4) Reports\n5) Logs\n6) Status\n7) Help\n0) Exit\n\n"
+    printf "Choice: "
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1) scanner_menu ;;
+      2) proxy_menu ;;
+      3) web_menu ;;
+      4) run_menu_action run_report ;;
+      5) logs_menu ;;
+      6) run_menu_action show_status ;;
+      7) run_menu_action usage ;;
+      0|"") return 0 ;;
+      *) printf "Invalid choice: %s\n" "$choice"; prompt_enter ;;
+    esac
+  done
 }
 
 need_project() {
@@ -941,9 +1075,13 @@ web_cmd() {
   esac
 }
 
-cmd="${1:-help}"
+cmd="${1:-}"
 
 case "$cmd" in
+  "")
+    interactive_menu
+    ;;
+
   start)
     start_service
     ;;

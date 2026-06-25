@@ -5,14 +5,14 @@ Static HTML/CSS/JS served by the FastAPI Web UI app on port `8080`.
 Run through systemd:
 
 ```bash
-cd /root/api_maker
+cd /path/to/api_maker
 keyhive web restart
 ```
 
 Manual run:
 
 ```bash
-cd /root/api_maker
+cd /path/to/api_maker
 python3 -m uvicorn web_ui.back_end.app:app --host 0.0.0.0 --port 8080
 ```
 
