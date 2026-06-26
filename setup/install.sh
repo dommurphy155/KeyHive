@@ -33,6 +33,26 @@ have() {
   command -v "$1" >/dev/null 2>&1
 }
 
+ensure_node_command() {
+  # Debian-derived hosts often provide `nodejs` but not `node`. The rest of the
+  # setup expects `node`, so create the compatibility symlink when possible.
+  if have node || ! have nodejs; then
+    return
+  fi
+
+  local nodejs_path
+  nodejs_path="$(command -v nodejs)"
+  if [ "$(id -u)" -eq 0 ]; then
+    ln -sf "$nodejs_path" /usr/local/bin/node
+  elif have sudo; then
+    sudo ln -sf "$nodejs_path" /usr/local/bin/node
+  else
+    warn "nodejs is installed but node is missing, and sudo is unavailable."
+    warn "Install a node binary or add a node symlink before rerunning the installer."
+    return 1
+  fi
+}
+
 run_privileged() {
   if [ "$(id -u)" -eq 0 ]; then
     "$@"
@@ -80,6 +100,8 @@ install_base_packages() {
     nodejs \
     npm \
     psmisc
+
+  ensure_node_command
 }
 
 main() {
@@ -89,6 +111,7 @@ main() {
   # installed or skipped by the guided installer.
   have python3 || die "python3 is required"
   install_base_packages
+  ensure_node_command
 
   if [ ! -d "$VENV_DIR" ]; then
     info "Creating Python virtual environment"
