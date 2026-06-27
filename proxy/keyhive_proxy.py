@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from proxy.fallback.manager import FallbackManager
 from proxy.fallback.nvidia_client import NvidiaClient
-from proxy.hf_client import HFClient, retry_after_seconds
+from proxy.hf_client import HFClient
 from proxy.key_store import KeyState, KeyStore
 from proxy.openai_compat import (
     anthropic_openai_payload,
@@ -188,15 +188,11 @@ def upstream_error_code(response: Any) -> str:
 
 
 async def mark_status(state: KeyState, status: int, headers: httpx.Headers | None) -> None:
-    # Upstream auth and rate-limit failures mutate the key pool because the
-    # failing key is no longer safe to keep using.
+    # Upstream auth and server failures mutate the key pool. 429/402 are
+    # handled in the failover loops (permanent discard), not here.
     if status in {401, 403}:
         await key_store.invalidate_key(state, f"upstream {status}")
         logger.warning("disabled invalid key %s after upstream %s", state.fingerprint, status)
-    elif status == 429:
-        seconds = retry_after_seconds(headers)
-        await key_store.cooldown_key(state, seconds)
-        logger.warning("cooling key %s for %ss after upstream 429", state.fingerprint, seconds)
     elif status >= 500:
         await key_store.fail_key(state)
 
@@ -404,12 +400,18 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
         last_status = response.status_code
         last_message = upstream_error_text(response)
 
-        if response.status_code == 402:
+        if response.status_code in {402, 429}:
+            # 402 = credits exhausted, 429 = quota/billing limit. Both mean the
+            # key is dead for the foreseeable future, so discard it permanently:
+            # remove from the in-memory pool and atomically from keys.txt, then
+            # fast-fail over to the next key with no retry on the dead key.
+            reason = "credits exhausted" if response.status_code == 402 else "quota/billing 429"
             logger.warning(
-                "[PROXY] HF key exhausted: %s — removing from active pool and keys.txt",
+                "[PROXY] HF key dead (%s): %s — discarding from pool and keys.txt, moving to next key",
+                reason,
                 state.fingerprint,
             )
-            await key_store.exhaust_key(state, "credits exhausted")
+            await key_store.exhaust_key(state, reason)
             refresh_provider_mode()
             key_failovers += 1
             if refresh_provider_mode() == "nvidia":
@@ -423,16 +425,6 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
         ):
             logger.warning("HF model rejected by provider; using NVIDIA fallback for this request")
             return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
-
-        if response.status_code == 429:
-            retry_after = retry_after_seconds(response.headers)
-            logger.warning(
-                "[PROXY] HF key rate limited: %s — cooldown %ss",
-                state.fingerprint,
-                retry_after,
-            )
-            key_failovers += 1
-            continue
 
         if response.status_code in {500, 502, 503, 504}:
             if server_retries >= MAX_RETRIES:
@@ -496,26 +488,22 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
             )
 
         await mark_status(state, status, headers)
-        if status == 402:
+        if status in {402, 429}:
+            # 402 = credits exhausted, 429 = quota/billing limit. Both mean the
+            # key is dead for the foreseeable future, so discard it permanently:
+            # remove from the in-memory pool and atomically from keys.txt, then
+            # fast-fail over to the next key with no retry on the dead key.
+            reason = "credits exhausted" if status == 402 else "quota/billing 429"
             logger.warning(
-                "[PROXY] HF key exhausted: %s — removing from active pool and keys.txt",
+                "[PROXY] HF key dead (%s): %s — discarding from pool and keys.txt, moving to next key",
+                reason,
                 state.fingerprint,
             )
-            await key_store.exhaust_key(state, "credits exhausted")
+            await key_store.exhaust_key(state, reason)
             refresh_provider_mode()
             key_failovers += 1
             if refresh_provider_mode() == "nvidia":
                 return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
-            continue
-
-        if status == 429:
-            retry_after = retry_after_seconds(headers)
-            logger.warning(
-                "[PROXY] HF key rate limited: %s — cooldown %ss",
-                state.fingerprint,
-                retry_after,
-            )
-            key_failovers += 1
             continue
 
         if status in {500, 502, 503, 504}:
