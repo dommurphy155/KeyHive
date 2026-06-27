@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+import time
+import uuid
 from pathlib import Path
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -103,15 +105,24 @@ def json_error(message: str, code: str, status: int) -> JSONResponse:
 
 
 def log_request_input(route: str, payload: dict[str, Any]) -> None:
-    # Dump the exact payload about to be sent upstream so operators can see the
-    # full prompt in `keyhive proxy logs` before it hits the key. Logged once per
-    # request at the entrypoint, not inside the failover loop, so retries don't
-    # spam duplicates.
+    # Save the exact payload about to be sent upstream to a /tmp file and log
+    # the path so operators can inspect the full prompt without bloating the
+    # journal. Logged once per request at the entrypoint, not inside the
+    # failover loop, so retries don't spam duplicates.
     try:
         rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     except (TypeError, ValueError):
         rendered = repr(payload)
-    logger.info("[PROXY] request input (%s):\n%s", route, rendered)
+
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+    filename = f"keyhive-req-{stamp}-{uuid.uuid4().hex[:8]}.json"
+    path = Path("/tmp") / filename
+    try:
+        path.write_text(rendered, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("[PROXY] request input (%s): failed to write %s: %s", route, path, exc)
+        return
+    logger.info("[PROXY] request input (%s): saved to %s", route, path)
 
 
 def hf_usable_keys() -> int:
