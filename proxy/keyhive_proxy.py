@@ -122,7 +122,8 @@ def log_request_input(route: str, payload: dict[str, Any]) -> None:
     except OSError as exc:
         logger.warning("[PROXY] request input (%s): failed to write %s: %s", route, path, exc)
         return
-    logger.info("[PROXY] request input (%s): saved to %s", route, path)
+    logger.info("[PROXY] request input (%s) saved to file:", route)
+    logger.info("[PROXY] input file: %s", path)
 
 
 def hf_usable_keys() -> int:
