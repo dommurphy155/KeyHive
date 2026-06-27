@@ -22,7 +22,6 @@ from proxy.fallback.manager import FallbackManager
 from proxy.fallback.nvidia_client import NvidiaClient
 from proxy.hf_client import HFClient
 from proxy.key_store import KeyState, KeyStore
-from proxy.system_rewriter import rewrite_system
 from proxy.openai_compat import (
     anthropic_openai_payload,
     anthropic_response_from_blocks,
@@ -363,11 +362,6 @@ async def handle_non_stream(model: str, payload: dict[str, Any]) -> JSONResponse
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_non_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
 
-    # Reshape the system message once per request (not per key attempt) before
-    # the failover loop. Operates on a local copy so the caller's payload is
-    # untouched and retries send the same rewritten body to every key.
-    payload = {**payload, "messages": rewrite_system(payload.get("messages") or [])}
-
     attempts = max(1, key_store.stats()["keys_total"] + MAX_RETRIES)
     last_status = 503
     last_message = "no usable keys are available"
@@ -461,9 +455,6 @@ async def handle_stream(model: str, payload: dict[str, Any]) -> StreamingRespons
     # but preserves SSE framing all the way back to the client.
     if refresh_provider_mode() == "nvidia":
         return await handle_nvidia_stream(NVIDIA_MODEL, {**payload, "model": NVIDIA_MODEL})
-
-    # Reshape the system message once per request before the failover loop.
-    payload = {**payload, "messages": rewrite_system(payload.get("messages") or [])}
 
     attempts = max(1, key_store.stats()["keys_total"] + MAX_RETRIES)
     key_failovers = 0
