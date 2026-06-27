@@ -102,6 +102,18 @@ def json_error(message: str, code: str, status: int) -> JSONResponse:
     return JSONResponse(openai_error(message, code, status), status_code=status)
 
 
+def log_request_input(route: str, payload: dict[str, Any]) -> None:
+    # Dump the exact payload about to be sent upstream so operators can see the
+    # full prompt in `keyhive proxy logs` before it hits the key. Logged once per
+    # request at the entrypoint, not inside the failover loop, so retries don't
+    # spam duplicates.
+    try:
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+    except (TypeError, ValueError):
+        rendered = repr(payload)
+    logger.info("[PROXY] request input (%s):\n%s", route, rendered)
+
+
 def hf_usable_keys() -> int:
     return key_store.stats()["keys_available"]
 
@@ -259,6 +271,8 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
     upstream_payload["messages"] = messages
     stream = bool(upstream_payload.get("stream", False))
 
+    log_request_input("v1/chat/completions", upstream_payload)
+
     if stream:
         active_requests += 1
         response = await handle_stream(model, upstream_payload)
@@ -290,6 +304,8 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
             {"type": "error", "error": {"type": "invalid_request_error", "message": str(exc)}},
             status_code=400,
         )
+
+    log_request_input("v1/messages", payload)
 
     active_requests += 1
     try:
