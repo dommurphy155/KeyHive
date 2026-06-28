@@ -1,0 +1,37 @@
+{
+  "started_at": "2026-06-27T23:56:00.743024+00:00",
+  "restart": {
+    "requests": 572,
+    "successes": 571,
+    "failures": 1,
+    "prompt_tokens": 28529505,
+    "completion_tokens": 234762,
+    "total_tokens": 28764267,
+    "tool_calls": 564,
+    "provider_hf": 571,
+    "provider_nvidia": 1,
+    "models": {
+      "test/model": 1,
+      "test/model2": 1,
+      "Qwen/Qwen3.6-35B-A3B": 501,
+      "moonshotai/Kimi-K2.5": 68
+    }
+  },
+  "all_time": {
+    "requests": 163878,
+    "successes": 163308,
+    "failures": 570,
+    "prompt_tokens": 8891328105,
+    "completion_tokens": 52322223,
+    "total_tokens": 8943650328,
+    "tool_calls": 169467,
+    "provider_hf": 163307,
+    "provider_nvidia": 571,
+    "models": {
+      "test/model": 572,
+      "test/model2": 571,
+      "Qwen/Qwen3.6-35B-A3B": 159819,
+      "moonshotai/Kimi-K2.5": 2346
+    }
+  }
+}

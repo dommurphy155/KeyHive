@@ -372,6 +372,73 @@ show_status() {
   "$PYTHON_BIN" "$RUN_STATS_PY" status
 }
 
+_show_proxy_stats() {
+  # Display proxy statistics from the /stats endpoint.
+  local body
+  body="$(curl -fsS "$PROXY_URL/stats" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    echo "  ✗ Cannot reach proxy at $PROXY_URL"
+    return
+  fi
+
+  "$PYTHON_BIN" - "$body" <<'PY'
+import json, sys, locale
+try:
+    locale.setlocale(locale.LC_NUMERIC, "")
+except Exception:
+    locale = None
+
+data = json.loads(sys.argv[1])
+p = data.get("proxy", {})
+
+def fmt(n):
+    if locale:
+        return locale.format_string("%d", n, grouping=True)
+    return str(n)
+
+print(f"  {'Requests (restart):':<26} {fmt(p.get('restart', {}).get('requests', 0))}")
+print(f"  {'Requests (all time):':<26} {fmt(p.get('all_time', {}).get('requests', 0))}")
+print(f"  {'Successes (restart):':<26} {fmt(p.get('restart', {}).get('successes', 0))}")
+print(f"  {'Successes (all time):':<26} {fmt(p.get('all_time', {}).get('successes', 0))}")
+print(f"  {'Failures (restart):':<26} {fmt(p.get('restart', {}).get('failures', 0))}")
+print(f"  {'Failures (all time):':<26} {fmt(p.get('all_time', {}).get('failures', 0))}")
+print(f"  {'Tokens (restart):':<26} {fmt(p.get('restart', {}).get('total_tokens', 0))}")
+print(f"  {'Tokens (all time):':<26} {fmt(p.get('all_time', {}).get('total_tokens', 0))}")
+print(f"  {'Prompt tokens (restart):':<26} {fmt(p.get('restart', {}).get('prompt_tokens', 0))}")
+print(f"  {'Prompt tokens (all time):':<26} {fmt(p.get('all_time', {}).get('prompt_tokens', 0))}")
+print(f"  {'Completion tokens (restart):':<26} {fmt(p.get('restart', {}).get('completion_tokens', 0))}")
+print(f"  {'Completion tokens (all time):':<26} {fmt(p.get('all_time', {}).get('completion_tokens', 0))}")
+print(f"  {'Tool calls (restart):':<26} {fmt(p.get('restart', {}).get('tool_calls', 0))}")
+print(f"  {'Tool calls (all time):':<26} {fmt(p.get('all_time', {}).get('tool_calls', 0))}")
+
+rt = p.get("restart", {})
+at = p.get("all_time", {})
+avg_rt = rt.get("avg_tokens_per_request", 0)
+avg_at = at.get("avg_tokens_per_request", 0)
+print(f"  {'Avg tokens/req (restart):':<26} {avg_rt:.0f if avg_rt else '?'}")
+print(f"  {'Avg tokens/req (all time):':<26} {avg_at:.0f if avg_at else '?'}")
+
+uptime = p.get("uptime_seconds", 0)
+if uptime > 0:
+    hrs = int(uptime // 3600)
+    mins = int((uptime % 3600) // 60)
+    print(f"  {'Uptime:':<26} {hrs}h {mins}m")
+
+print()
+print(f"  {'Current provider:':<26} {data.get('current_provider', data.get('fallback', {}).get('current_provider', '?'))}")
+print(f"  {'Fallback active:':<26} {'Yes' if data.get('fallback', {}).get('fallback_enabled', False) else 'No'}")
+
+models = {}
+for bucket in (rt, at):
+    for m, c in bucket.get("models", {}).items():
+        models[m] = models.get(m, 0) + c
+if models:
+    print(f"  {'Models used:':<26}")
+    for m in sorted(models, key=models.get, reverse=True):
+        print(f"    {m:<42} {fmt(models[m])}")
+PY
+}
+
 show_logs() {
   lines="120"
   follow="false"
@@ -869,6 +936,27 @@ print(f"  {'Exhausted removed runtime:':<30} {data.get('exhausted_keys_this_runt
 print(f"  {'Disabled removed runtime:':<30} {data.get('disabled_keys_this_runtime', 0)}")
 print(f"  {'Cooling down:':<30} {data.get('keys_cooling_down', 0)}")
 print(f"  {'Active requests:':<30} {data.get('active_requests', 0)}")
+
+# Proxy statistics
+p = data.get("proxy", {})
+def fmt(n):
+    return f"{n:,}" if isinstance(n, int) else str(n)
+rt = p.get("restart", {})
+at = p.get("all_time", {})
+print()
+print(f"  {'─' * 50}")
+print(f"  {'PROXY STATISTICS':<30}")
+print(f"  {'─' * 50}")
+print(f"  {'Requests (restart):':<30} {fmt(rt.get('requests', 0))}")
+print(f"  {'Requests (all time):':<30} {fmt(at.get('requests', 0))}")
+print(f"  {'Prompt tokens (restart):':<30} {fmt(rt.get('prompt_tokens', 0))}")
+print(f"  {'Prompt tokens (all time):':<30} {fmt(at.get('prompt_tokens', 0))}")
+print(f"  {'Completion tokens (restart):':<30} {fmt(rt.get('completion_tokens', 0))}")
+print(f"  {'Completion tokens (all time):':<30} {fmt(at.get('completion_tokens', 0))}")
+print(f"  {'Total tokens (restart):':<30} {fmt(rt.get('total_tokens', 0))}")
+print(f"  {'Total tokens (all time):':<30} {fmt(at.get('total_tokens', 0))}")
+print(f"  {'Tool calls (restart):':<30} {fmt(rt.get('tool_calls', 0))}")
+print(f"  {'Tool calls (all time):':<30} {fmt(at.get('tool_calls', 0))}")
 PY
 }
 

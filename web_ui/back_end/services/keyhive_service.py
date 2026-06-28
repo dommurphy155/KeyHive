@@ -58,7 +58,7 @@ SETTING_SCHEMA: dict[str, dict[str, Any]] = {
     "KEYHIVE_FALLBACK_ENABLED": {"label": "Fallback enabled", "section": "models", "type": "bool", "default": "1", "restart": "proxy"},
     "KEYHIVE_FALLBACK_ENTER_AT": {"label": "Fallback enter threshold", "section": "models", "type": "int", "min": 0, "max": 100000, "default": "0", "restart": "proxy"},
     "KEYHIVE_FALLBACK_EXIT_AT": {"label": "Fallback exit threshold", "section": "models", "type": "int", "min": 0, "max": 100000, "default": "10", "restart": "proxy"},
-    "KEYHIVE_PROXY_DEFAULT_MODEL": {"label": "Hugging Face default model", "section": "models", "type": "text", "default": "zai-org/GLM-5.2", "restart": "proxy"},
+    "KEYHIVE_PROXY_DEFAULT_MODEL": {"label": "Hugging Face default model", "section": "models", "type": "text", "default": "Qwen/Qwen3.6-35B-A3B", "restart": "proxy"},
     "KEYHIVE_PROXY_NVIDIA_MODEL": {"label": "NVIDIA fallback model", "section": "models", "type": "text", "default": "moonshotai/kimi-k2.6", "restart": "proxy"},
     "KEYHIVE_PROXY_RELOAD_SECONDS": {"label": "Key reload seconds", "section": "proxy", "type": "int", "min": 1, "max": 3600, "default": "5", "restart": "proxy"},
     "KEYHIVE_PROXY_REQUEST_TIMEOUT": {"label": "Request timeout seconds", "section": "proxy", "type": "float", "min": 1, "max": 1800, "default": "300", "restart": "proxy"},
