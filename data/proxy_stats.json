@@ -1,37 +1,37 @@
 {
   "started_at": "2026-06-27T23:56:00.743024+00:00",
   "restart": {
-    "requests": 2002,
-    "successes": 2001,
+    "requests": 2006,
+    "successes": 2005,
     "failures": 1,
-    "prompt_tokens": 41033365,
-    "completion_tokens": 1285598,
-    "total_tokens": 42318963,
+    "prompt_tokens": 41101081,
+    "completion_tokens": 1288790,
+    "total_tokens": 42389871,
     "tool_calls": 876,
-    "provider_hf": 2001,
+    "provider_hf": 2005,
     "provider_nvidia": 1,
     "models": {
       "test/model": 1,
       "test/model2": 1,
       "Qwen/Qwen3.6-35B-A3B": 501,
-      "moonshotai/Kimi-K2.5": 1498
+      "moonshotai/Kimi-K2.5": 1502
     }
   },
   "all_time": {
-    "requests": 2005003,
-    "successes": 2003003,
-    "failures": 2000,
-    "prompt_tokens": 58415862489,
-    "completion_tokens": 1236340285,
-    "total_tokens": 59652202774,
-    "tool_calls": 1159407,
-    "provider_hf": 2003002,
-    "provider_nvidia": 2001,
+    "requests": 2013021,
+    "successes": 2011017,
+    "failures": 2004,
+    "prompt_tokens": 58580100019,
+    "completion_tokens": 1241489149,
+    "total_tokens": 59821589168,
+    "tool_calls": 1162911,
+    "provider_hf": 2011016,
+    "provider_nvidia": 2005,
     "models": {
-      "test/model": 2002,
-      "test/model2": 2001,
-      "Qwen/Qwen3.6-35B-A3B": 876249,
-      "moonshotai/Kimi-K2.5": 1122751
+      "test/model": 2006,
+      "test/model2": 2005,
+      "Qwen/Qwen3.6-35B-A3B": 878253,
+      "moonshotai/Kimi-K2.5": 1128753
     }
   }
 }
