@@ -1,37 +1,37 @@
 {
   "started_at": "2026-06-27T23:56:00.743024+00:00",
   "restart": {
-    "requests": 2814,
-    "successes": 2813,
+    "requests": 2850,
+    "successes": 2849,
     "failures": 1,
-    "prompt_tokens": 75422239,
-    "completion_tokens": 1699302,
-    "total_tokens": 77121541,
-    "tool_calls": 2144,
-    "provider_hf": 2813,
+    "prompt_tokens": 77256687,
+    "completion_tokens": 1733950,
+    "total_tokens": 78990637,
+    "tool_calls": 2166,
+    "provider_hf": 2849,
     "provider_nvidia": 1,
     "models": {
       "test/model": 1,
       "test/model2": 1,
       "Qwen/Qwen3.6-35B-A3B": 501,
-      "moonshotai/Kimi-K2.5": 2310
+      "moonshotai/Kimi-K2.5": 2346
     }
   },
   "all_time": {
-    "requests": 3960705,
-    "successes": 3957893,
-    "failures": 2812,
-    "prompt_tokens": 106205986060,
-    "completion_tokens": 2411675101,
-    "total_tokens": 108617661161,
-    "tool_calls": 2275521,
-    "provider_hf": 3957892,
-    "provider_nvidia": 2813,
+    "requests": 4062675,
+    "successes": 4059827,
+    "failures": 2848,
+    "prompt_tokens": 108955584200,
+    "completion_tokens": 2473463449,
+    "total_tokens": 111429047649,
+    "tool_calls": 2353130,
+    "provider_hf": 4059826,
+    "provider_nvidia": 2849,
     "models": {
-      "test/model": 2814,
-      "test/model2": 2813,
-      "Qwen/Qwen3.6-35B-A3B": 1283061,
-      "moonshotai/Kimi-K2.5": 2669205
+      "test/model": 2850,
+      "test/model2": 2849,
+      "Qwen/Qwen3.6-35B-A3B": 1301097,
+      "moonshotai/Kimi-K2.5": 2753031
     }
   }
 }
