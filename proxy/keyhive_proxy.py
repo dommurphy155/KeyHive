@@ -138,21 +138,9 @@ def json_error(message: str, code: str, status: int) -> JSONResponse:
     return JSONResponse(openai_error(message, code, status), status_code=status)
 
 
-def _save_payload(route: str, payload: dict[str, Any]) -> str:
-    """Save payload to /tmp for debugging. Returns a short request ID."""
-    rid = uuid.uuid4().hex[:8]
-    try:
-        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-    except (TypeError, ValueError):
-        rendered = repr(payload)
-    filename = f"keyhive-{rid}-{time.strftime('%Y%m%dT%H%M%S')}.json"
-    log_path = Path("/tmp") / filename
-    try:
-        log_path.write_text(rendered, encoding="utf-8")
-        logger.info("SAVED %s -> %s", rid, log_path)
-    except OSError:
-        pass
-    return rid
+def _generate_rid() -> str:
+    """Generate a short request ID for tracing."""
+    return uuid.uuid4().hex[:8]
 
 
 def _extract_usage(json_data: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -327,7 +315,7 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
 
     replace_system_prompt(upstream_payload, provider="openai")
 
-    rid = _save_payload("v1/chat/completions", upstream_payload)
+    rid = _generate_rid()
     provider = refresh_provider_mode()
     started = time.monotonic()
     logger.info(">%s %s stream=%s provider=%s", rid, model, "yes" if stream else "no", provider)
@@ -374,7 +362,7 @@ async def anthropic_messages(request: Request) -> JSONResponse | StreamingRespon
             status_code=400,
         )
 
-    rid = _save_payload("v1/messages", payload)
+    rid = _generate_rid()
     started = time.monotonic()
 
     active_requests += 1
