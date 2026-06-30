@@ -1386,19 +1386,19 @@ if proxy_stats_file.exists():
 out["logs"] = {"scanner": [], "proxy": [], "web": []}
 
 # Scanner logs
-scanner_log = run(["journalctl", "-u", SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+scanner_log = run(["journalctl", "-u", SERVICE, "-b", "-n", "150", "-o", "cat"], shell=False)
 if scanner_log:
-    out["logs"]["scanner"] = scanner_log.split("\n")[-500:]
+    out["logs"]["scanner"] = scanner_log.split("\n")[-150:]
 
 # Proxy logs
-proxy_log = run(["journalctl", "-u", PROXY_SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+proxy_log = run(["journalctl", "-u", PROXY_SERVICE, "-b", "-n", "150", "-o", "cat"], shell=False)
 if proxy_log:
-    out["logs"]["proxy"] = proxy_log.split("\n")[-500:]
+    out["logs"]["proxy"] = proxy_log.split("\n")[-150:]
 
 # Web logs
-web_log = run(["journalctl", "-u", WEB_SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+web_log = run(["journalctl", "-u", WEB_SERVICE, "-b", "-n", "150", "-o", "cat"], shell=False)
 if web_log:
-    out["logs"]["web"] = web_log.split("\n")[-500:]
+    out["logs"]["web"] = web_log.split("\n")[-150:]
 
 # Processes
 out["processes"] = []
