@@ -48,18 +48,6 @@ const dbg  = (msg) => { if (process.env.DEBUG) console.log(`[${ts()}]   ${msg}`)
 const sleep      = (ms)  => new Promise((r) => setTimeout(r, ms));
 const humanDelay = (min = 500, max = 1200) => sleep(min + Math.random() * (max - min));
 
-// Pause for manual intervention — waits for Enter key
-function pauseForManual(msg) {
-  const readline = require("readline");
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(`\n[${ts()}] ⏸️  ${msg} (Press Enter to continue...) `, () => {
-      rl.close();
-      resolve();
-    });
-  });
-}
-
 // Load Gmail credentials from the shared .env file, then merge in every Chrome
 // profile folder on disk. Profile discovery is deliberately authoritative:
 // metadata gets stale, folders do not lie.
@@ -869,9 +857,6 @@ async function attemptAccount(account) {
       ok("Microsoft auth opened");
       try { await microsoftPage.waitForLoadState("domcontentloaded", { timeout: 10000 }); } catch {}
       await humanDelay(1000, 2000);
-
-      // Pause for manual login if desired
-      await pauseForManual("Microsoft login page ready - complete login manually or press Enter to auto-fill");
 
       if (await visible(microsoftPage.locator('input[type="email"], input[name="loginfmt"]'))) {
         step(`Entering Microsoft email (${account.email})...`);
