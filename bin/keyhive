@@ -106,6 +106,7 @@ usage() {
   section "OTHER"
   row "doctor" "Run local diagnostics"
   row "tree" "Show the stripped-down repo layout"
+  row "ai" "Dump complete system state for AI (JSON)"
   row "help" "Show this help"
 
   section "SERVICES"
@@ -1163,6 +1164,316 @@ web_cmd() {
   esac
 }
 
+ai_help() {
+  # Dump complete system state as compact JSON for AI consumption
+  need_project
+
+  "$PYTHON_BIN" - "$ROOT_DIR" "$SERVICE" "$PROXY_SERVICE" "$WEB_SERVICE" "$PROXY_URL" "$WEB_URL" "$NODE_BIN" "$HF_KEYS_JS" "$COUNT_KEYS_PY" "$RUN_STATS_PY" "$KEYS_FILE" "$COOKIE_FILE" "$LOG_FILE" "$RUN_STATS_FILE" <<'PY'
+import json
+import sys
+import os
+import subprocess
+import hashlib
+from pathlib import Path
+from datetime import datetime
+
+ROOT_DIR, SERVICE, PROXY_SERVICE, WEB_SERVICE, PROXY_URL, WEB_URL, NODE_BIN, HF_KEYS_JS, COUNT_KEYS_PY, RUN_STATS_PY, KEYS_FILE, COOKIE_FILE, LOG_FILE, RUN_STATS_FILE = sys.argv[1:]
+
+def run(cmd, shell=False):
+    try:
+        if shell:
+            return subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, text=True).strip()
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True).strip()
+    except:
+        return None
+
+def file_sha(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except:
+        return None
+
+def file_info(path):
+    try:
+        s = os.stat(path)
+        return {"size": s.st_size, "mtime": int(s.st_mtime), "sha": file_sha(path)}
+    except:
+        return None
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except:
+        return None
+
+def mask(s):
+    if not s or len(s) < 10:
+        return s
+    return s[:6] + "..." + s[-4:]
+
+now = datetime.utcnow().isoformat() + "Z"
+
+# Build response
+out = {
+    "meta": {"ts": now, "hostname": run("hostname"), "cwd": os.getcwd(), "whoami": run("whoami")},
+    "project": {"root": ROOT_DIR, "dirs": [], "files": []}
+}
+
+# Directory structure
+for root, dirs, files in os.walk(ROOT_DIR):
+    rel = os.path.relpath(root, ROOT_DIR)
+    if rel == ".":
+        rel = ""
+    for d in dirs:
+        if d not in ['.git', '.venv', 'node_modules', '__pycache__', '.pytest_cache']:
+            out["project"]["dirs"].append(os.path.join(rel, d).lstrip("/"))
+    for f in files:
+        if not f.endswith(('.pyc', '.log', '.tmp')):
+            fp = os.path.join(root, f)
+            info = file_info(fp)
+            if info:
+                info["p"] = os.path.join(rel, f).lstrip("/")
+                out["project"]["files"].append(info)
+
+# Config
+out["config"] = {"env": {}, "systemd": {}, "proxy": {}, "web": {}}
+
+# .env parsing
+env_path = Path(ROOT_DIR) / ".env"
+if env_path.exists():
+    for line in env_path.read_text().splitlines():
+        if line and "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            if any(x in k.lower() for x in ['key', 'token', 'secret', 'password', 'api']):
+                out["config"]["env"][k] = mask(v)
+            else:
+                out["config"]["env"][k] = v
+
+# Systemd units
+for svc in [SERVICE, PROXY_SERVICE, WEB_SERVICE]:
+    unit_path = Path("/etc/systemd/system") / svc
+    if unit_path.exists():
+        out["config"]["systemd"][svc] = unit_path.read_text()
+    else:
+        alt = Path(ROOT_DIR) / "systemd" / svc
+        if alt.exists():
+            out["config"]["systemd"][svc] = alt.read_text()
+
+# Proxy config
+proxy_conf = read_json(Path(ROOT_DIR) / "proxy" / "config.json")
+if proxy_conf:
+    out["config"]["proxy"] = proxy_conf
+
+# Services
+out["services"] = {"scanner": {}, "proxy": {}, "web": {}}
+
+# Scanner service
+scanner_active = run(["systemctl", "is-active", SERVICE])
+scanner_show = run(["systemctl", "show", SERVICE, "-p", "MainPID,ActiveEnterTimestamp,MemoryCurrent,CPUUsageNSec"]) or ""
+scanner_pid = None
+for line in scanner_show.split("\n"):
+    if line.startswith("MainPID="):
+        try:
+            scanner_pid = int(line.split("=", 1)[1])
+        except:
+            pass
+
+out["services"]["scanner"] = {
+    "unit": SERVICE,
+    "active": scanner_active == "active",
+    "enabled": run(["systemctl", "is-enabled", SERVICE]) == "enabled",
+    "pid": scanner_pid,
+    "state": scanner_active or "unknown"
+}
+
+# Proxy service
+proxy_active = run(["systemctl", "is-active", PROXY_SERVICE])
+proxy_show = run(["systemctl", "show", PROXY_SERVICE, "-p", "MainPID"]) or ""
+proxy_pid = None
+for line in proxy_show.split("\n"):
+    if line.startswith("MainPID="):
+        try:
+            proxy_pid = int(line.split("=", 1)[1])
+        except:
+            pass
+
+out["services"]["proxy"] = {
+    "unit": PROXY_SERVICE,
+    "active": proxy_active == "active",
+    "pid": proxy_pid,
+    "port": 8787
+}
+
+# Try proxy health
+proxy_health = run(["curl", "-fsS", f"{PROXY_URL}/health"], shell=False)
+if proxy_health:
+    try:
+        out["services"]["proxy"]["health"] = json.loads(proxy_health)
+    except:
+        out["services"]["proxy"]["health_raw"] = proxy_health
+
+# Try proxy stats
+proxy_stats = run(["curl", "-fsS", f"{PROXY_URL}/stats"], shell=False)
+if proxy_stats:
+    try:
+        out["services"]["proxy"]["stats"] = json.loads(proxy_stats)
+    except:
+        out["services"]["proxy"]["stats_raw"] = proxy_stats
+
+# Web service
+web_active = run(["systemctl", "is-active", WEB_SERVICE])
+web_show = run(["systemctl", "show", WEB_SERVICE, "-p", "MainPID"]) or ""
+web_pid = None
+for line in web_show.split("\n"):
+    if line.startswith("MainPID="):
+        try:
+            web_pid = int(line.split("=", 1)[1])
+        except:
+            pass
+
+out["services"]["web"] = {
+    "unit": WEB_SERVICE,
+    "active": web_active == "active",
+    "pid": web_pid,
+    "port": 8080
+}
+
+# Try web status
+web_status = run(["curl", "-fsS", f"{WEB_URL}/api/status"], shell=False)
+if web_status:
+    try:
+        out["services"]["web"]["status"] = json.loads(web_status)
+    except:
+        out["services"]["web"]["status_raw"] = web_status
+
+# Data files
+out["data"] = {"keys": {}, "cookie": {}, "stats": {}, "proxy_stats": {}}
+
+# Keys file
+keys_info = file_info(KEYS_FILE)
+if keys_info:
+    out["data"]["keys"]["file"] = KEYS_FILE
+    out["data"]["keys"]["count"] = keys_info["size"] // 50  # Approx
+    out["data"]["keys"]["size_bytes"] = keys_info["size"]
+    out["data"]["keys"]["mtime"] = keys_info["mtime"]
+
+# Cookie file
+cookie_info = file_info(COOKIE_FILE)
+if cookie_info:
+    out["data"]["cookie"] = {
+        "file": COOKIE_FILE,
+        "exists": True,
+        "mtime": cookie_info["mtime"],
+        "age_s": int(datetime.utcnow().timestamp()) - cookie_info["mtime"]
+    }
+    cookie_content = read_json(COOKIE_FILE)
+    if cookie_content and isinstance(cookie_content, dict):
+        out["data"]["cookie"]["content"] = {k: mask(v) if isinstance(v, str) and len(v) > 10 else v for k, v in cookie_content.items()}
+
+# Run stats
+run_stats = read_json(RUN_STATS_FILE)
+if run_stats:
+    out["data"]["stats"] = run_stats
+
+# Proxy stats file
+proxy_stats_file = Path(ROOT_DIR) / "data" / "proxy_stats.json"
+if proxy_stats_file.exists():
+    out["data"]["proxy_stats"] = read_json(proxy_stats_file) or {}
+
+# Logs
+out["logs"] = {"scanner": [], "proxy": [], "web": []}
+
+# Scanner logs
+scanner_log = run(["journalctl", "-u", SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+if scanner_log:
+    out["logs"]["scanner"] = scanner_log.split("\n")[-500:]
+
+# Proxy logs
+proxy_log = run(["journalctl", "-u", PROXY_SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+if proxy_log:
+    out["logs"]["proxy"] = proxy_log.split("\n")[-500:]
+
+# Web logs
+web_log = run(["journalctl", "-u", WEB_SERVICE, "-b", "-n", "500", "-o", "cat"], shell=False)
+if web_log:
+    out["logs"]["web"] = web_log.split("\n")[-500:]
+
+# Processes
+out["processes"] = []
+ps_out = run("ps aux | grep -E '(keyhive|hf_keys|proxy|api-maker)' | grep -v grep", shell=True)
+if ps_out:
+    for line in ps_out.split("\n")[:20]:
+        parts = line.split()
+        if len(parts) >= 11:
+            try:
+                out["processes"].append({
+                    "pid": int(parts[1]),
+                    "cpu": parts[2],
+                    "mem": parts[3],
+                    "cmd": " ".join(parts[10:])[:100]
+                })
+            except:
+                pass
+
+# Network
+out["network"] = {"listening": [], "connections": []}
+netstat = run("ss -tlnp 2>/dev/null | grep -E ':(8787|8080)'", shell=True)
+if netstat:
+    for line in netstat.split("\n"):
+        if "8787" in line or "8080" in line:
+            parts = line.split()
+            if len(parts) >= 5:
+                out["network"]["listening"].append({
+                    "local": parts[4],
+                    "process": parts[-1] if "users:" in line else "unknown"
+                })
+
+# Disk
+out["disk"] = {}
+df = run(f"df -h {ROOT_DIR} | tail -1", shell=True)
+if df:
+    parts = df.split()
+    if len(parts) >= 6:
+        out["disk"]["project"] = {"total": parts[1], "used": parts[2], "free": parts[3], "pct": parts[4]}
+
+# Environment versions
+out["versions"] = {}
+node_ver = run(["node", "--version"]) if Path(NODE_BIN).exists() else None
+if node_ver:
+    out["versions"]["node"] = node_ver
+py_ver = run(["python3", "--version"])
+if py_ver:
+    out["versions"]["python"] = py_ver
+
+# Chrome
+chrome = run("which google-chrome-stable google-chrome chromium chromium-browser 2>/dev/null | head -1", shell=True)
+out["versions"]["chrome"] = chrome is not None
+
+# Code documentation
+out["code"] = {
+    "scanner": {"file": HF_KEYS_JS, "purpose": "Automated HF API key acquisition via browser automation", "lang": "javascript"},
+    "proxy": {"file": str(Path(ROOT_DIR)/"proxy"/"server.py"), "purpose": "OpenAI-compatible API proxy with HF/NVIDIA fallback", "lang": "python"},
+    "web": {"file": str(Path(ROOT_DIR)/"web"/"server.js"), "purpose": "Web UI for key management and monitoring", "lang": "javascript"},
+    "utils": [
+        {"file": COUNT_KEYS_PY, "purpose": "Count and report key capacity", "lang": "python"},
+        {"file": RUN_STATS_PY, "purpose": "Track scanner run statistics", "lang": "python"}
+    ]
+}
+
+# State
+out["state"] = {
+    "last_status": out["data"].get("stats", {}).get("last_status"),
+    "last_failure": out["data"].get("stats", {}).get("last_failure"),
+    "keys_available": out["data"]["keys"].get("count", 0),
+    "cookie_age_m": out["data"]["cookie"].get("age_s", 0) // 60 if out["data"]["cookie"].get("age_s") else None
+}
+
+print(json.dumps(out, separators=(',', ':')))
+PY
+}
+
 cmd="${1:-}"
 
 case "$cmd" in
@@ -1203,6 +1514,10 @@ case "$cmd" in
     run_doctor
     ;;
 
+  ai)
+    ai_help
+    ;;
+
   proxy)
     shift || true
     proxy_cmd "${1:-help}" "${2:-}"
@@ -1215,6 +1530,10 @@ case "$cmd" in
 
   help|-h|--help)
     usage
+    ;;
+
+  ai-help)
+    ai_help
     ;;
 
   runs)
